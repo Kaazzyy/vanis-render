@@ -73,7 +73,7 @@ async function sendVideo(filePath, seconds) {
 
   if (size > 8 * 1024 * 1024) {
     await whPost({
-      content: `${INPUT_USER ? `<@${INPUT_USER}> ` : ""}⚠️ O vídeo final ficou com **${(size / 1048576).toFixed(1)}MB** (limite do webhook ~8MB) e não pôde ser enviado. Tenta: \`--res 720 --fps 30\` ou \`--quality low\`.`,
+      content: `${INPUT_USER ? `<@${INPUT_USER}> ` : ""}⚠️ The final video is **${(size / 1048576).toFixed(1)}MB** (webhook limit is ~8MB) and couldn't be sent. Try: \`--res 720 --fps 30\` or \`--quality low\`.`,
     });
     return;
   }
@@ -84,7 +84,7 @@ async function sendVideo(filePath, seconds) {
   }));
   fd.append("files[0]", new Blob([fs.readFileSync(sendPath)], { type: "video/mp4" }), `${INPUT_FILENAME}.mp4`);
   const res = await fetch(`${WEBHOOK}?wait=true`, { method: "POST", body: fd });
-  if (!res.ok) throw new Error(`upload do vídeo falhou ${res.status}: ${(await res.text()).slice(0, 200)}`);
+  if (!res.ok) throw new Error(`video upload failed ${res.status}: ${(await res.text()).slice(0, 200)}`);
 }
 
 // ---------- main ----------
@@ -95,12 +95,12 @@ async function sendVideo(filePath, seconds) {
 
   try {
     if (!API_BASE || !WEBHOOK || !INPUT_CODE) {
-      throw new Error("Env em falta: API_BASE, WEBHOOK_URL e INPUT_CODE são obrigatórios.");
+      throw new Error("Missing env: API_BASE, WEBHOOK_URL and INPUT_CODE are required.");
     }
 
     log("A buscar replay", INPUT_CODE, "de", API_BASE);
     const res = await fetch(`${API_BASE}/api/replays/${encodeURIComponent(INPUT_CODE)}`);
-    if (res.status === 404) throw new Error(`Nenhum replay com o código **${INPUT_CODE}** (o serviço pode ter reiniciado e perdido ficheiros).`);
+    if (res.status === 404) throw new Error(`No replay found for code **${INPUT_CODE}** (the service may have restarted and lost files).`);
     if (!res.ok) throw new Error(`API respondeu HTTP ${res.status}`);
     const data = await res.text();
     log(`Replay OK (${data.length} bytes)`);
@@ -163,7 +163,7 @@ async function sendVideo(filePath, seconds) {
     await done;
 
     const outPath = path.join(renderer.OUTPUT_PATH, `${task.hash}.mp4`);
-    if (!fs.existsSync(outPath)) throw new Error("ffmpeg terminou mas o mp4 não existe");
+    if (!fs.existsSync(outPath)) throw new Error("ffmpeg finished but the mp4 file doesn't exist");
     const seconds = Math.round((Date.now() - startTime) / 1000);
     log("A enviar vídeo:", outPath, `${(fs.statSync(outPath).size / 1048576).toFixed(1)}MB`);
 
