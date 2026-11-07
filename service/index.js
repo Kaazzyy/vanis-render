@@ -140,25 +140,25 @@ function parseConfig(raw) {
     };
     switch (arg) {
       case "--fps":
-        if (!check(["60", "30", "25", "1"], "fps")) return bad(`FPS inválido (${next}). Usa 60|30|25.`);
+        if (!check(["60", "30", "25", "1"], "fps")) return bad(`Input FPS **${next}** is not a valid option (**60**|**30**|**25**)`);
         break;
       case "--res":
-        if (!check(["1080", "720", "480", "360", "240", "144"], "res")) return bad(`Resolução inválida (${next}).`);
+        if (!check(["1080", "720", "480", "360", "240", "144"], "res")) return bad(`Input resolution **${next}** is not a valid option (**1080**|**720**|**480**|**360**|**240**|**144**)`);
         break;
       case "--skin":
-        if (!check(["all", "tag", "me", "none"], "skin")) return bad(`Skin inválida (${next}).`);
+        if (!check(["all", "tag", "me", "none"], "skin")) return bad(`Input skin option **${next}** is not a valid option (**all**|**tag**|**me**|**none**)`);
         break;
       case "--name":
-        if (!check(["all", "hideme", "none"], "name")) return bad(`Name inválido (${next}).`);
+        if (!check(["all", "hideme", "none"], "name")) return bad(`Input name option **${next}** is not a valid option (**all**|**hideme**|**none**)`);
         break;
       case "--mass":
-        if (!check(["short", "long", "none"], "mass")) return bad(`Mass inválida (${next}).`);
+        if (!check(["short", "long", "none"], "mass")) return bad(`Input mass option **${next}** is not a valid option (**short**|**long**|**none**)`);
         break;
       case "--quality":
-        if (!check(["high", "medium", "low"], "quality")) return bad(`Quality inválida (${next}).`);
+        if (!check(["high", "medium", "low"], "quality")) return bad(`Input quality option **${next}** is not a valid option (**high**|**medium**|**low**)`);
         break;
       default:
-        if (arg.startsWith("--")) return bad(`Argumento desconhecido: **${arg}** (nota: --dm não existe na v2)`);
+        if (arg.startsWith("--")) return bad(`Unknown argument: **${arg}** (note: --dm doesn't exist in v2)`);
         if (next) args.unshift(next);
     }
   }
@@ -166,7 +166,7 @@ function parseConfig(raw) {
 }
 
 async function dispatchWorkflow(inputs) {
-  if (!GH_TOKEN || !GH_REPO) throw new Error("GH_TOKEN/GH_REPO não configurados no serviço (Render env).");
+  if (!GH_TOKEN || !GH_REPO) throw new Error("GH_TOKEN/GH_REPO not configured in the service (Render env).");
   const url = `https://api.github.com/repos/${GH_REPO}/actions/workflows/${GH_WORKFLOW}/dispatches`;
   const res = await fetch(url, {
     method: "POST",
@@ -182,7 +182,7 @@ async function dispatchWorkflow(inputs) {
   if (res.status === 204) return;
   let detail = "";
   try { detail = (await res.text()).slice(0, 300); } catch {}
-  throw new Error(`GitHub respondeu ${res.status}: ${detail}`);
+  throw new Error(`GitHub responded ${res.status}: ${detail}`);
 }
 
 async function uploadToOwnAPI(buffer) {
@@ -192,7 +192,7 @@ async function uploadToOwnAPI(buffer) {
     body: Buffer.from(buffer),
   });
   const j = await res.json();
-  if (!res.ok || !j.code) throw new Error(`Upload falhou: ${JSON.stringify(j).slice(0, 200)}`);
+  if (!res.ok || !j.code) throw new Error(`Upload failed: ${JSON.stringify(j).slice(0, 200)}`);
   return j.code;
 }
 
@@ -223,12 +223,12 @@ if (DISCORD_TOKEN) {
       if (OWNER_ID && message.author.id === OWNER_ID) {
         if (/^!disable/i.test(message.content)) {
           state.disabled = true;
-          await replyTemp(message.channel, "Bot **desativado**.");
+          await replyTemp(message.channel, "Bot **disabled**.");
           return;
         }
         if (/^!enable/i.test(message.content)) {
           state.disabled = false;
-          await replyTemp(message.channel, "Bot **ativado**.");
+          await replyTemp(message.channel, "Bot **enabled**.");
           return;
         }
       }
@@ -239,8 +239,8 @@ if (DISCORD_TOKEN) {
       if (content === "!help") {
         await message.channel.send(
           "Render options: ```\n--skin [all|tag|me|none]\n--name [all|hideme|none]\n--mass [long|short|none]\n--res [1080|720|480|360|240]\n--fps [60|30|25]\n--quality [high|medium|low]```" +
-          "\nUso: `!render CODIGO` ou anexa um ficheiro **.vanis** (≤5MB) neste canal." +
-          "\n💡 No free tier, para clips longos prefere `--res 720 --fps 30`."
+          "\nUsage: `!render CODE` or attach a **.vanis** file (≤5MB) in this channel." +
+          "\n💡 On the free tier, prefer `--res 720 --fps 30` for long clips."
         );
         return;
       }
@@ -262,17 +262,17 @@ if (DISCORD_TOKEN) {
       for (const att of vanisAttachments) {
         const size = att.size || 0;
         if (size > 5 * 1024 * 1024) {
-          await replyTemp(message.channel, "O replay é demasiado grande! Máximo **5MB**.");
+          await replyTemp(message.channel, "Your replay file is too big!\nA normal replay file should be less than **5MB**");
           return;
         }
         const res = await fetch(att.url);
         if (!res.ok) {
-          await replyTemp(message.channel, `Falha ao baixar o anexo (HTTP ${res.status}).`);
+          await replyTemp(message.channel, `Failed to fetch the attachment (status ${res.status})`);
           return;
         }
         const buf = Buffer.from(await res.arrayBuffer());
         if (!buf.toString("utf8", 0, 7).startsWith("REPLAY|")) {
-          await replyTemp(message.channel, "Ficheiro inválido — não começa por `REPLAY|`.");
+          await replyTemp(message.channel, "Invalid replay format");
           return;
         }
         try {
@@ -280,7 +280,7 @@ if (DISCORD_TOKEN) {
           datasets.push({ code, filename: att.name });
         } catch (e) {
           console.error("[Bot] upload próprio falhou:", e.message);
-          await replyTemp(message.channel, `Falha ao guardar o replay: ${e.message}`);
+          await replyTemp(message.channel, `Failed to save the replay: ${e.message}`);
           return;
         }
       }
@@ -300,14 +300,14 @@ if (DISCORD_TOKEN) {
             filename: ds.filename.replace(/\.vanis$/i, ""),
           });
           const embed = new EmbedBuilder()
-            .setTitle(`${ds.filename.replace(/\.vanis$/i, "")}.mp4 (na fila)`)
+            .setTitle(`${ds.filename.replace(/\.vanis$/i, "")}.mp4 (queued)`)
             .setColor(0x00FFFF)
-            .setDescription(`🎬 Pedido de <@${message.author.id}> entrou na fila de render.\nO vídeo aparece aqui quando estiver pronto (pode levar **vários minutos**).`)
+            .setDescription(`🎬 Render request from <@${message.author.id}> is in the queue.\nThe video will appear here when it's ready (it can take **several minutes**).`)
             .setTimestamp();
           await message.channel.send({ embeds: [embed] });
         } catch (e) {
           console.error("[Bot] dispatch falhou:", e.message);
-          await replyTemp(message.channel, `❌ Não consegui pôr na fila: ${e.message}`);
+          await replyTemp(message.channel, `❌ Couldn't queue the render: ${e.message}`);
         }
       }
     } catch (e) {
