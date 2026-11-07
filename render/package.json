@@ -1,0 +1,12 @@
+{
+  "name": "vanis-render-worker",
+  "version": "2.0.0",
+  "private": true,
+  "main": "worker.js",
+  "dependencies": {
+    "discord.js": "^14.14.1",
+    "dropbox-v2-api": "^2.4.4",
+    "electron": "^28.0.0",
+    "uid-safe": "^2.1.5"
+  }
+}

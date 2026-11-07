@@ -1,0 +1,336 @@
+const { app, BrowserWindow, ipcMain } = require("electron");
+// v2: ffmpeg do PATH do sistema no Actions (sem download de binario do npm)
+let ffmpegPath = "ffmpeg";
+try { ffmpegPath = require("@ffmpeg-installer/ffmpeg").path; } catch {}
+const { spawn }  = require("child_process");
+
+const logger = require("./Logger");
+const Bot = require("./Bot");
+const Pool = require("./Pool");
+
+let configJson = {};
+try { configJson = require("../config.json"); } catch {}
+// config.json e opcional — no Hugging Face usamos Secrets (env); valores por omissao:
+let concurrency = configJson.concurrency ?? 1;
+let dump = configJson.dump ?? 0;
+
+const Path = require("path");
+const OUTPUT_PATH = Path.resolve(__dirname, "..", "output");
+const QUEUE_PATH  = Path.resolve(__dirname, "..", "queue");
+const DUMP_PATH   = Path.resolve(__dirname, "..", "dump");
+
+const fs = require("fs");
+
+if (!fs.existsSync(OUTPUT_PATH)) fs.mkdirSync(OUTPUT_PATH);
+if (!fs.existsSync(QUEUE_PATH))  fs.mkdirSync(QUEUE_PATH);
+if (!fs.existsSync(DUMP_PATH))   fs.mkdirSync(DUMP_PATH);
+
+app.commandLine.appendSwitch("ignore-gpu-blacklist");
+app.commandLine.appendSwitch("disable-gpu");
+// v27-hf: no Linux (Xvfb) a janela nunca e mostrada — sem isto o Chromium engasga os
+// requestAnimationFrame do renderer e os frames nunca chegam ao ffmpeg.
+app.commandLine.appendSwitch("disable-renderer-backgrounding");
+app.commandLine.appendSwitch("disable-backgrounding-occluded-windows");
+
+module.exports = class RendererApp {
+
+    constructor() {
+        this.ensureSingleInstance();
+        this.concurrency = Math.max(~~concurrency, 1);
+        this.bot = new Bot(this);
+        this.pool = new Pool(this);
+        this.tasks = {};
+        this.rendering = [];
+        this.tabs = {};
+        this.rendered = [];
+    }
+
+    get defaultRenderConfig() {
+        return  {
+            fps:     "60",
+            res:     "1080",
+            skin:    "all",
+            name:    "all",
+            mass:    "short",
+            quality: "medium",
+        }
+    }
+
+    get QUEUE_PATH()  { return QUEUE_PATH  }
+    get OUTPUT_PATH() { return OUTPUT_PATH }
+
+    ensureSingleInstance() {
+        const lock = app.requestSingleInstanceLock();
+        if (!lock) {
+            logger.error("Second instance, quiting");
+            app.quit();
+            return;
+        }
+    }
+
+    async init() {
+        console.log("");
+        logger.verbose(`Concurrency: ${this.concurrency}`);
+        await new Promise(resolve => app.on("ready", resolve));
+        logger.verbose("Electron app ready");
+        await this.bot.init();
+
+        let frame = 0;
+        ipcMain.on("render-error", (_, hash, msg) => this.abortTask(hash, msg));
+
+        ipcMain.on("buffer", (_, hash, base64) => {
+            let tab = this.tabs[hash];
+            if (!tab) return;                       // late frame of a task that already ended/aborted
+            tab.lastBuffer = Date.now();
+            let { shell } = tab;
+            if (!shell) return;
+            let buffer = base64 && Buffer.from(base64, "base64");
+            logger.debug(`Buffer length: ${buffer ? buffer.byteLength : "[END]"}`);
+            if (shell.stdin.writable) {
+                if (buffer) {
+                    shell.stdin.write(buffer);
+                } else {
+                    logger.verbose("Ending FFMPEG stdin");
+                    shell.stdin.end();
+                    // v26: the render window was never closed (one leaked Chromium + WebGL context
+                    // per clip until the app was restarted)
+                    try { tab.window && tab.window.destroy(); } catch {}
+                    delete this.tabs[hash];
+                }
+            }
+            frame++;
+            if (dump) {
+                fs.writeFileSync(Path.resolve(DUMP_PATH, `frame${String(frame).padStart(4, "0")}.jpeg`), buffer);
+            }
+        });
+        
+        this.exec();
+    }
+
+    async exec() {
+        try {
+            this.checkStalled();
+            let tries = 0;
+            while (this.rendering.length < this.concurrency && tries++ < this.concurrency) {
+                let task = this.pool.offer(h => this.tabs[h] || this.rendering.includes(h) || this.rendered.includes(h));
+                if (!task) break;
+                console.log(`[Pool] Vai renderizar ${task.hash} (${task.filename})`);
+                await this.execTask(task);
+            }
+        } catch (e) {
+            logger.error(e);
+            console.error("[Exec Error]", e);
+        }
+        setTimeout(this.exec.bind(this), 1000);
+    }
+
+    // v26: stop a render that failed or stalled: kill ffmpeg, close the window, tell Discord, and
+    // free the pool slot so the next !render runs.
+    abortTask(hash, reason) {
+        let tab = this.tabs[hash];
+        if (!tab || tab.aborted) return;
+        tab.aborted = true;
+        this.aborts = this.aborts || {};
+        this.aborts[hash] = reason || "render failed";
+        console.error(`[App] A abortar ${hash}: ${this.aborts[hash]}`);
+        try { tab.window && tab.window.destroy(); } catch {}
+        try { tab.shell && tab.shell.stdin && tab.shell.stdin.destroy(); } catch {}
+        try { tab.shell && tab.shell.kill(); } catch {}
+    }
+
+    checkStalled() {
+        const now = Date.now();
+        for (const hash of Object.keys(this.tabs)) {
+            const tab = this.tabs[hash];
+            if (!tab || tab.aborted) continue;
+            if (now - (tab.lastBuffer || tab.started || now) > 120000)
+                this.abortTask(hash, "render stalled (no frames for 120 s)");
+        }
+    }
+
+    // a .vanis is "REPLAY|proto|thumb|b64|b64|..." — every packet must be valid base64
+    validateVanis(data) {
+        const parts = data.trim().split("|");
+        if (parts[0] !== "REPLAY" || parts.length < 6) return "not a .vanis (missing header / packets)";
+        for (let i = 3; i < parts.length; i++) {
+            if (!/^[A-Za-z0-9+\/]*={0,2}$/.test(parts[i]) || parts[i].length % 4 === 1)
+                return `corrupt packet #${i - 3} (invalid base64) — re-save the clip with the updated game`;
+        }
+        return null;
+    }
+
+    addTask(task, callbacks) {
+        logger.verbose(`Adding task#${task.hash}`);
+        console.log(`[App] Task adicionada ${task.hash}`);
+        this.tasks[task.hash] = callbacks;
+        this.pool.add(task);
+    }
+
+    async execTask(task) {
+        if (!task || !task.hash) return;
+        if (this.tabs[task.hash] || this.rendering.includes(task.hash) || this.rendered.includes(task.hash)) return;
+        if (!this.tasks[task.hash])
+            this.tasks[task.hash] = await this.bot.generateCallbacks(task);
+
+        if (!this.tasks[task.hash]) {
+            logger.warn(`Failed to generate callback for task#${task.hash}, aborting`);
+            this.pool.done(task.hash);
+            return;
+        }
+
+        let inputPath = Path.resolve(this.QUEUE_PATH, `${task.hash}.vanis`);
+        if (!fs.existsSync(inputPath)) {
+            console.log(`[App] Ficheiro nao existe ${inputPath}`);
+            return;
+        }
+        
+        let config = Object.assign({}, task.config);
+
+        // v26: refuse a corrupt clip up-front instead of opening a window that can only crash
+        const rawData = fs.readFileSync(inputPath, "utf-8");
+        const bad = this.validateVanis(rawData);
+        if (bad) {
+            console.error(`[App] Clip invalido (${task.hash}): ${bad}`);
+            try { this.tasks[task.hash].onError(bad); } catch {}
+            try { fs.unlinkSync(inputPath); } catch {}
+            this.pool.done(task.hash);
+            delete this.tasks[task.hash];
+            return;
+        }
+
+        try {
+            await this.tasks[task.hash].onBegin();
+        } catch(e) { console.error("[onBegin Error]", e); }
+
+        this.rendering.push(task.hash);
+        let { width, height } = this.resToDim(task.config.res);
+
+        console.log(`[App] A criar janela ${width}x${height} para ${task.hash}`);
+        console.log(`[App] FFmpeg path: ${ffmpegPath}`);
+
+        const renderWindow = new BrowserWindow({
+            width,
+            height,
+            frame: false,
+            closable: false,
+            resizable: false,
+            minimizable: false,
+            maximizable: false,
+            show: false,
+            webPreferences: { 
+                nodeIntegration: true,
+                contextIsolation: false,
+                offscreen: false,
+                backgroundThrottling: false
+            },
+        });
+
+        let args = [
+            '-y',
+            '-f', 'image2pipe',
+            '-framerate', config.fps,
+            '-i', '-',
+            '-profile:v', 'baseline',
+            '-crf', {"high":"10","medium":"23","low":"40"}[config.quality],
+            '-pix_fmt', 'yuv420p',
+            '-c:v', 'libx264',
+            Path.resolve(OUTPUT_PATH, `${task.hash}.mp4`)];
+
+        if (process.platform !== "win32")
+            ffmpegPath = "ffmpeg";
+    
+        console.log(`[App] A iniciar ffmpeg: ${ffmpegPath} ${args.join(" ")}`);
+        let shell = spawn(ffmpegPath, args);
+        this.tabs[task.hash] = { window: renderWindow, shell, started: Date.now(), lastBuffer: Date.now() };
+
+        shell.once("exit", code => {
+            code ? logger.error(`FFMPEG exited with code ${code}`) : logger.verbose(`FFMPEG exited with code ${code}`);
+            console.log(`[FFMPEG] exit code ${code} para ${task.hash}`);
+            try { fs.unlinkSync(Path.resolve(this.QUEUE_PATH, `${task.hash}.vanis`)); } catch {}
+            let callbacks = this.tasks[task.hash];
+            const idx = this.rendering.indexOf(task.hash);
+            if (idx >= 0) this.rendering.splice(idx, 1);
+            this.rendered.push(task.hash);
+            this.pool.done(task.hash);
+            delete this.tasks[task.hash];
+            const abortReason = this.aborts && this.aborts[task.hash];
+            delete this.tabs[task.hash];
+            if (abortReason) {
+                delete this.aborts[task.hash];
+                try { fs.unlinkSync(Path.resolve(OUTPUT_PATH, `${task.hash}.mp4`)); } catch {}
+                callbacks && callbacks.onError(abortReason);
+            } else if (!code) {
+                callbacks && callbacks.onFinish();
+            } else {
+                callbacks && callbacks.onError(`Error(${code})`);
+            }
+        });
+
+        shell.on("error", err => {
+            console.error("[FFMPEG spawn error]", err);
+            logger.error(err);
+        });
+
+        shell.on("close", (code, signal) => {
+            logger.debug(`FFMPEG closed with code ${code} and signal ${signal}`);
+            console.log(`[FFMPEG] closed code ${code} signal ${signal}`);
+        });
+
+        let data = rawData;
+        let frames = ~~config.fps * (data.split("|").length - 4) / 25;
+        logger.verbose(`Total frame: ${frames}`);
+        console.log(`[App] Total frames estimado: ${frames}`);
+
+        shell.stderr.on("data", chunk => {
+            let txt = chunk.toString();
+            logger.debug(txt);
+            // console.log("[FFMPEG]", txt);
+            let args = txt.split(/ +/g);
+            if (args[0] == "frame=" && /^[1-9]\d*$/.test(args[1])) {
+                let progress = parseInt(args[1]) / frames;
+                this.tasks[task.hash].onProgress(progress);
+            }
+        });
+
+        config.res = `${width}x${height}`;
+        
+        // Captura console do browser pra debug
+        renderWindow.webContents.on("console-message", (event, level, message, line, sourceId) => {
+            console.log(`[Browser ${level}] ${message} (${sourceId}:${line})`);
+        });
+        renderWindow.webContents.on("crashed", () => {
+            console.error(`[Window] CRASHED para ${task.hash}`);
+        });
+        renderWindow.webContents.on("render-process-gone", (e, details) => {
+            console.error(`[Window] render-process-gone ${JSON.stringify(details)} para ${task.hash}`);
+        });
+        renderWindow.webContents.on("unresponsive", () => {
+            console.error(`[Window] unresponsive para ${task.hash}`);
+        });
+
+        renderWindow.webContents.once("dom-ready", () => {
+            logger.verbose(`Starting to render ${task.hash}`);
+            console.log(`[App] dom-ready, a enviar render para ${task.hash}`);
+            // Abre DevTools se precisar ver erro - comenta depois
+            // renderWindow.webContents.openDevTools({ mode: 'detach' });
+            renderWindow.webContents.send("render", task.hash, data, config);
+        });
+
+        renderWindow.webContents.on("did-fail-load", (e, code, desc) => {
+            console.error(`[Window] did-fail-load ${code} ${desc}`);
+        });
+
+        renderWindow.loadFile("./browser/index.html");
+    }
+
+    resToDim(res) {
+        return {
+            1080: { width: 1920, height: 1080 },
+            720: { width: 1280, height: 720 },
+            480: { width: 858, height: 480 },
+            360: { width: 480, height: 360 },
+            240: { width: 426, height: 240 },
+            144: { width: 256, height: 144 }
+        }[res];
+    }
+}
