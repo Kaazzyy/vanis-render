@@ -1,0 +1,69 @@
+name: Vanis Render
+
+on:
+  workflow_dispatch:
+    inputs:
+      code:
+        description: "Código do replay (da API)"
+        required: true
+      config:
+        description: "Config de render em JSON (fps/res/skin/name/mass/quality)"
+        required: false
+        default: "{}"
+      user_id:
+        description: "ID do utilizador do Discord que pediu"
+        required: false
+        default: ""
+      filename:
+        description: "Nome do clip (sem extensão)"
+        required: false
+        default: "clip"
+
+# um clip por código de cada vez; pedidos diferentes podem correr em paralelo
+concurrency:
+  group: vanis-${{ github.event.inputs.code }}
+  cancel-in-progress: false
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    defaults:
+      run:
+        working-directory: render
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      # dependências do Chromium/Electron no runner Ubuntu
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            xvfb ffmpeg fonts-liberation fontconfig \
+            libgtk-3-0 libnss3 libasound2t64 libatk1.0-0 libatk-bridge2.0-0 \
+            libcups2 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 \
+            libxfixes3 libxrandr2 libgbm1 libpango-1.0-0 libcairo2 \
+            libxss1 libxtst6 libnotify4 libsecret-1-0 libxshmfence1 \
+          || sudo apt-get install -y --no-install-recommends \
+            xvfb ffmpeg fonts-liberation fontconfig \
+            libgtk-3-0 libnss3 libasound2 libatk1.0-0 libatk-bridge2.0-0 \
+            libcups2 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 \
+            libxfixes3 libxrandr2 libgbm1 libpango-1.0-0 libcairo2 \
+            libxss1 libxtst6 libnotify4 libsecret-1-0 libxshmfence1
+
+      - name: Install npm deps
+        run: npm install --no-audit --no-fund
+
+      - name: Render + send to Discord
+        env:
+          API_BASE: ${{ secrets.VANIS_API_BASE }}
+          WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          INPUT_CODE: ${{ github.event.inputs.code }}
+          INPUT_CONFIG: ${{ github.event.inputs.config }}
+          INPUT_USER_ID: ${{ github.event.inputs.user_id }}
+          INPUT_FILENAME: ${{ github.event.inputs.filename }}
+        run: xvfb-run -a npx electron . --no-sandbox --disable-gpu --disable-dev-shm-usage
