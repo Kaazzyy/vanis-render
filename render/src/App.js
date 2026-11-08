@@ -71,7 +71,7 @@ module.exports = class RendererApp {
     async init() {
         console.log("");
         logger.verbose(`Concurrency: ${this.concurrency}`);
-        await new Promise(resolve => app.on("ready", resolve));
+        await app.whenReady(); // v2.1: same race fix as worker.js
         logger.verbose("Electron app ready");
         await this.bot.init();
 
