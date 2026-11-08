@@ -106,7 +106,10 @@ async function sendVideo(filePath, seconds) {
     log(`Replay OK (${data.length} bytes)`);
 
     const renderer = new RendererApp();
-    await new Promise(resolve => app.on("ready", resolve));
+    // v2.1: app.on("ready") can silently hang if ready already fired (race on fast runners)
+    // — whenReady() always resolves. This was the cause of renders hanging until the job timeout.
+    log("Waiting for Electron to be ready…");
+    await app.whenReady();
     log("Electron ready");
 
     // mesmos handlers IPC do App.init (sem login de bot!)
@@ -130,6 +133,7 @@ async function sendVideo(filePath, seconds) {
     });
 
     // mensagem inicial de progresso
+    log("Posting initial progress message to the webhook…");
     const msg = await whPost({ embeds: [barEmbed(0)] });
     progressMessageId = msg && msg.id;
 
