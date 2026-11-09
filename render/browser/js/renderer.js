@@ -473,7 +473,7 @@ async (_, hash, data, config) => {
         autoZoom: true,
         showChat: false,
         showBackgroundImage: true,
-        backgroundImageUrl: "https://i.imgur.com/8Y9W7z7.png",
+        backgroundImageUrl: "assets/bg.png",
         backgroundImageRepeat: true,
         backgroundImageOpacity: .6,
         backgroundColor: 1184274,
@@ -741,7 +741,7 @@ async (_, hash, data, config) => {
             this.image = new Image;
             this.image.onload = this.onLoad.bind(this);
             this.image.onerror = this.image.onabort = this.onError.bind(this);
-            this.image.crossOrigin = "anonymous";
+            if (/^https?:/i.test(x)) this.image.crossOrigin = "anonymous"; // v2.5: só para URLs externos — ficheiros locais não têm CORS
             this.image.src = x;
         }
 
@@ -1096,7 +1096,7 @@ async (_, hash, data, config) => {
             x && !this.backgroundSprite ? this.setBackgroundImage(t.backgroundImageUrl, t.backgroundImageRepeat) : x || this.destroyBackgroundImage(true)
         }
         async setBackgroundImage(x, a) {
-            if (this.border.width !== this.border.height && t.backgroundDefaultIfUnequal && (x = "https://i.imgur.com/8Y9W7z7.png",
+            if (this.border.width !== this.border.height && t.backgroundDefaultIfUnequal && (x = "assets/bg.png",
             a = true),
             x) {
                 // console.log(`Setting Background Image to ${x}`);
