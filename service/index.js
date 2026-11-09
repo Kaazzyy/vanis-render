@@ -196,7 +196,138 @@ async function uploadToOwnAPI(buffer) {
   return j.code;
 }
 
-const state = { disabled: false };
+const state = { disabled: false, alerts: [], lastDispatch: null };
+
+function pushAlert(msg) {
+  const entry = { t: new Date(), msg: String(msg).slice(0, 300) };
+  state.alerts.push(entry);
+  if (state.alerts.length > 15) state.alerts.shift();
+  console.log(`[Alert] ${entry.msg}`);
+}
+
+function fmtUptime(sec) {
+  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60);
+  return h ? `${h}h ${m}m` : `${m}m ${Math.floor(sec % 60)}s`;
+}
+
+// helper para a API REST do GitHub (listar/cancelar runs — a "fila")
+async function ghApi(pathname, opts = {}) {
+  if (!GH_TOKEN || !GH_REPO) throw new Error("GH_TOKEN/GH_REPO not configured in the service (Render env).");
+  const res = await fetch(`https://api.github.com/repos/${GH_REPO}${pathname}`, {
+    ...opts,
+    headers: {
+      Authorization: `Bearer ${GH_TOKEN}`,
+      Accept: "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28",
+      "User-Agent": "vanis-service",
+      ...(opts.body ? { "Content-Type": "application/json" } : {}),
+    },
+  });
+  return res;
+}
+
+function activeRunsFilter(r) { return r.status === "queued" || r.status === "in_progress"; }
+
+async function cmdQueue(message) {
+  try {
+    const res = await ghApi("/actions/runs?per_page=30");
+    if (!res.ok) throw new Error(`GitHub responded ${res.status} (GH_TOKEN needs **Actions: Read and write**)`);
+    const j = await res.json();
+    const active = (j.workflow_runs || []).filter(activeRunsFilter);
+    if (!active.length) {
+      await replyTemp(message.channel, "Queue is empty — no queued or running renders. ✅", 15000);
+      return;
+    }
+    const lines = active.map(r =>
+      `• \`#${r.run_number}\` **${r.status}** — started <t:${Math.floor(new Date(r.created_at).getTime() / 1000)}:R> — id \`${r.id}\``
+    );
+    await replyTemp(message.channel,
+      `**Active renders (${active.length}):**\n${lines.join("\n")}\n\nCancel: \`!cancel all\` or \`!cancel <id>\``,
+      30000);
+  } catch (e) {
+    await replyTemp(message.channel, `❌ Couldn't list the queue: ${e.message}`, 15000);
+  }
+}
+
+async function cmdCancel(message) {
+  const arg = (message.content.split(/\s+/)[1] || "").toLowerCase();
+  try {
+    const res = await ghApi("/actions/runs?per_page=50");
+    if (!res.ok) throw new Error(`GitHub responded ${res.status}`);
+    const j = await res.json();
+    let active = (j.workflow_runs || []).filter(activeRunsFilter);
+    if (arg && arg !== "all") {
+      const id = arg.replace(/\D/g, "");
+      active = active.filter(r => String(r.id) === id);
+      if (!active.length) {
+        await replyTemp(message.channel, `No active run with id \`${arg}\`. Use \`!queue\` to list ids.`, 15000);
+        return;
+      }
+    }
+    if (!active.length) {
+      await replyTemp(message.channel, "Queue is already empty. ✅", 15000);
+      return;
+    }
+    let ok = 0;
+    for (const r of active) {
+      try {
+        const c = await ghApi(`/actions/runs/${r.id}/cancel`, { method: "POST" });
+        if (c.ok) ok++;
+      } catch {}
+    }
+    if (ok) pushAlert(`Cancelled ${ok}/${active.length} render run(s) via !cancel`);
+    await replyTemp(message.channel, `🛑 Cancelled **${ok}** of **${active.length}** active run(s).`, 20000);
+  } catch (e) {
+    await replyTemp(message.channel, `❌ Couldn't cancel: ${e.message}`, 15000);
+  }
+}
+
+async function cmdDebug(message) {
+  const cl = message.client;
+  const lines = [];
+  lines.push("**🤖 Bot (Render)**");
+  lines.push(`• Logged in: ${cl && cl.user ? `✅ ${cl.user.tag}` : "❌ not logged in"}`);
+  lines.push(`• Uptime: ${fmtUptime(process.uptime())} · WS ping: ${cl && cl.ws ? cl.ws.ping : "?"}ms`);
+  lines.push(`• State: ${state.disabled ? "⛔ disabled (`!enable`)" : "✅ enabled"} · Channel filter: ${CHANNELS.length ? `${CHANNELS.length} channel(s)` : "all"}`);
+
+  const db = loadDB();
+  let disk = 0;
+  try { for (const f of fs.readdirSync(FILES_DIR)) disk += fs.statSync(path.join(FILES_DIR, f)).size; } catch {}
+  lines.push("**🗄️ Replay API (Render)**");
+  lines.push(`• ✅ Online · **${Object.keys(db).length}** replay(s) stored · ${(disk / 1048576).toFixed(1)}MB on disk`);
+  lines.push(`• ⚠️ Files are ephemeral — a Render restart/sleep wipes them ("No replay found")`);
+
+  const ld = state.lastDispatch;
+  lines.push("**🐙 GitHub Actions**");
+  lines.push(`• Repo: \`${GH_REPO || "❌ missing"}\` · Workflow: \`${GH_WORKFLOW}\` · Ref: \`${GH_REF}\` · Token: ${GH_TOKEN ? "✅ set" : "❌ missing"}`);
+  lines.push(`• Last dispatch: ${ld ? (ld.ok ? `✅ \`${ld.code}\` at ${ld.at}` : `❌ \`${ld.code}\`: ${ld.error}`) : "none yet"}`);
+  try {
+    const res = await ghApi("/actions/runs?per_page=30");
+    if (res.ok) {
+      const j = await res.json();
+      const active = (j.workflow_runs || []).filter(activeRunsFilter);
+      lines.push(active.length
+        ? `• ⏳ Active runs: **${active.length}** — ${active.map(r => `\`#${r.run_number} ${r.status}\``).join(", ")}`
+        : "• Active runs: none");
+    } else {
+      lines.push(`• Active runs: GitHub responded ${res.status} (GH_TOKEN needs **Actions: Read and write**)`);
+    }
+  } catch (e) {
+    lines.push(`• Active runs: ${e.message}`);
+  }
+
+  lines.push("**⚠️ Alerts (last 15)**");
+  lines.push(state.alerts.length
+    ? state.alerts.slice().reverse().map(a => `• \`${a.t.toISOString().slice(11, 19)}Z\` ${a.msg}`).join("\n")
+    : "• None ✅");
+
+  const embed = new EmbedBuilder()
+    .setTitle("🔧 Vanis service — debug status")
+    .setColor(0x00BFFF)
+    .setDescription(lines.join("\n").slice(0, 4000))
+    .setTimestamp();
+  await message.channel.send({ embeds: [embed] }).catch(() => {});
+}
 
 if (DISCORD_TOKEN) {
   const client = new Client({
@@ -213,7 +344,7 @@ if (DISCORD_TOKEN) {
     client.user.setActivity("Vanis Clips", { type: ActivityType.Playing });
   });
 
-  client.on("error", (e) => console.error("[Bot error]", e));
+  client.on("error", (e) => { console.error("[Bot error]", e); pushAlert(`Discord client error: ${e.message}`); });
 
   client.on("messageCreate", async (message) => {
     try {
@@ -231,6 +362,9 @@ if (DISCORD_TOKEN) {
           await replyTemp(message.channel, "Bot **enabled**.");
           return;
         }
+        if (/^!queue\b/i.test(message.content)) { await cmdQueue(message); return; }
+        if (/^!cancel\b/i.test(message.content)) { await cmdCancel(message); return; }
+        if (/^!debug\b/i.test(message.content)) { await cmdDebug(message); return; }
       }
       if (state.disabled) return;
 
@@ -240,7 +374,8 @@ if (DISCORD_TOKEN) {
         await message.channel.send(
           "Render options: ```\n--skin [all|tag|me|none]\n--name [all|hideme|none]\n--mass [long|short|none]\n--res [1080|720|480|360|240]\n--fps [60|30|25]\n--quality [high|medium|low]```" +
           "\nUsage: `!render CODE` or attach a **.vanis** file (≤5MB) in this channel." +
-          "\n💡 On the free tier, prefer `--res 720 --fps 30` for long clips."
+          "\n💡 On the free tier, prefer `--res 720 --fps 30` for long clips." +
+          "\n\n**Owner:** `!debug` (status + alerts) · `!queue` (active renders) · `!cancel all|<id>` · `!disable` / `!enable`"
         );
         return;
       }
@@ -262,16 +397,19 @@ if (DISCORD_TOKEN) {
       for (const att of vanisAttachments) {
         const size = att.size || 0;
         if (size > 5 * 1024 * 1024) {
+          pushAlert(`Attachment rejected: ${att.name} is ${(size / 1048576).toFixed(1)}MB (>5MB)`);
           await replyTemp(message.channel, "Your replay file is too big!\nA normal replay file should be less than **5MB**");
           return;
         }
         const res = await fetch(att.url);
         if (!res.ok) {
+          pushAlert(`Attachment download failed (${att.name}): HTTP ${res.status}`);
           await replyTemp(message.channel, `Failed to fetch the attachment (status ${res.status})`);
           return;
         }
         const buf = Buffer.from(await res.arrayBuffer());
         if (!buf.toString("utf8", 0, 7).startsWith("REPLAY|")) {
+          pushAlert(`Invalid replay format: ${att.name}`);
           await replyTemp(message.channel, "Invalid replay format");
           return;
         }
@@ -280,6 +418,7 @@ if (DISCORD_TOKEN) {
           datasets.push({ code, filename: att.name });
         } catch (e) {
           console.error("[Bot] upload próprio falhou:", e.message);
+          pushAlert(`Failed to save replay ${att.name}: ${e.message}`);
           await replyTemp(message.channel, `Failed to save the replay: ${e.message}`);
           return;
         }
@@ -299,6 +438,7 @@ if (DISCORD_TOKEN) {
             user_id: message.author.id,
             filename: ds.filename.replace(/\.vanis$/i, ""),
           });
+          state.lastDispatch = { ok: true, code: ds.code, at: new Date().toISOString().slice(0, 19) + "Z" };
           const embed = new EmbedBuilder()
             .setTitle(`${ds.filename.replace(/\.vanis$/i, "")}.mp4 (queued)`)
             .setColor(0x00FFFF)
@@ -307,6 +447,8 @@ if (DISCORD_TOKEN) {
           await message.channel.send({ embeds: [embed] });
         } catch (e) {
           console.error("[Bot] dispatch falhou:", e.message);
+          state.lastDispatch = { ok: false, code: ds.code, at: new Date().toISOString().slice(0, 19) + "Z", error: e.message };
+          pushAlert(`Dispatch failed for \`${ds.code}\`: ${e.message}`);
           await replyTemp(message.channel, `❌ Couldn't queue the render: ${e.message}`);
         }
       }
@@ -317,6 +459,7 @@ if (DISCORD_TOKEN) {
 
   client.login(DISCORD_TOKEN).catch((e) => {
     console.error("[Bot] login falhou (a API continua de pé):", e.message);
+    pushAlert(`Discord login failed: ${e.message}`);
   });
 } else {
   console.log("[Bot] DISCORD_TOKEN não definido — só a API está ativa.");
