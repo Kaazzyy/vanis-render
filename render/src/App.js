@@ -26,15 +26,13 @@ if (!fs.existsSync(QUEUE_PATH))  fs.mkdirSync(QUEUE_PATH);
 if (!fs.existsSync(DUMP_PATH))   fs.mkdirSync(DUMP_PATH);
 
 app.commandLine.appendSwitch("ignore-gpu-blacklist");
-// v2.4 FIX: "disable-gpu" REMOVIDO. Sem GPU real, o Chromium usa SwiftShader
-// (software GL) — mas com --disable-gpu o contexto WebGL falhava com
-// "fail_if_major_perf_caveat + swiftshader" e o PIXI caía para o renderer
-// Canvas 2D, que não pré-carrega a textura de fundo (o gate em usingWebGL no
-// renderer.js), deixava o fundo escuro (#121212 sem imagem por cima) e a borda
-// preta de 45px ficava invisível contra esse fundo. Com ANGLE/SwiftShader
-// explícito o WebGL funciona e o log deve mostrar "WebGL Renderer".
+// v2.6 FIX: "disable-gpu" REMOVIDO — sem GPU o WebGL nunca arranca e o render cai
+// para Canvas 2D: sem imagem de fundo, sem borda do mapa, cor escura #121212.
 app.commandLine.appendSwitch("use-angle", "swiftshader");
 app.commandLine.appendSwitch("enable-unsafe-swiftshader");
+// v2.6 FIX: deixa o WebGL usar o bg.png e os assets locais (file://) sem o canvas
+// ficar "tainted" — sem isto o toDataURL dos frames falhava com SecurityError.
+app.commandLine.appendSwitch("allow-file-access-from-files");
 // v27-hf: no Linux (Xvfb) a janela nunca e mostrada — sem isto o Chromium engasga os
 // requestAnimationFrame do renderer e os frames nunca chegam ao ffmpeg.
 app.commandLine.appendSwitch("disable-renderer-backgrounding");
