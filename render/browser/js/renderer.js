@@ -475,8 +475,8 @@ async (_, hash, data, config) => {
         showBackgroundImage: true,
         backgroundImageUrl: "assets/bg.png",
         backgroundImageRepeat: true,
-        backgroundImageOpacity: 1,
-        backgroundColor: 1184274, // v2.7: fora da borda #121212 — mais claro que o mapa (valor original do jogo web)
+        backgroundImageOpacity: .6, // v2.8: valor real do jogo (default do cliente vanis)
+        backgroundColor: 1052688, // v2.8: #101010 — igual ao jogo real (string2hex("101010"))
         backgroundDefaultIfUnequal: true
     };
     window.setSkinMode = mode => {
@@ -1090,13 +1090,7 @@ async (_, hash, data, config) => {
             n.drawRect(0, 0, x, a),
             n.endFill(),
             n.position.set(-e, -t),
-            this.background.addChild(n);
-            var f = new (PIXI.Graphics);
-            f.beginFill(1052688, 1), // v2.7: base do mapa #101010 por baixo da textura — fora da borda fica #121212, mais claro
-            f.drawRect(0, 0, x, a),
-            f.endFill(),
-            f.position.set(-e, -t),
-            this.background.addChildAt(f, 0)
+            this.background.addChild(n)
         }
         toggleBackgroundImage(x) {
             x && !this.backgroundSprite ? this.setBackgroundImage(t.backgroundImageUrl, t.backgroundImageRepeat) : x || this.destroyBackgroundImage(true)
