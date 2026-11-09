@@ -53,6 +53,30 @@ function barEmbed(pct, title) {
     .setTimestamp();
 }
 
+// ---------- diagnóstico ----------
+// O Actions só mostra console.log — por isso o worker regista ele próprio o estado do
+// render (progresso real, frames recebidos, backlog do ffmpeg, RAM). Sem isto, um render
+// que "congela" é impossível de diagnosticar pelos logs.
+let renderer = null;
+let TASK_HASH = null;
+const STATS = { buffers: 0, dropped: 0, bytes: 0, lastPct: 0, startedAt: Date.now() };
+
+function renderStats() {
+  let backlog = 0;
+  try {
+    const tab = renderer && TASK_HASH ? renderer.tabs[TASK_HASH] : null;
+    if (tab && tab.shell && tab.shell.stdin) backlog = tab.shell.stdin.writableLength;
+  } catch {}
+  return [
+    `progress ${STATS.lastPct}%`,
+    `${STATS.buffers} frames received (${(STATS.bytes / 1048576).toFixed(1)}MB)`,
+    STATS.dropped ? `${STATS.dropped} DROPPED (ffmpeg stdin closed)` : null,
+    `ffmpeg stdin backlog ${(backlog / 1048576).toFixed(1)}MB`,
+    `RAM ${(process.memoryUsage().rss / 1048576).toFixed(0)}MB`,
+    `elapsed ${Math.round((Date.now() - STATS.startedAt) / 1000)}s`,
+  ].filter(Boolean).join(" | ");
+}
+
 async function sendVideo(filePath, seconds) {
   const MAX = 7.8 * 1024 * 1024;
   let sendPath = filePath;
@@ -91,7 +115,6 @@ async function sendVideo(filePath, seconds) {
 (async () => {
   let exitCode = 1;
   let progressMessageId = null;
-  let lastPct = -1;
 
   try {
     if (!API_BASE || !WEBHOOK || !INPUT_CODE) {
@@ -105,7 +128,7 @@ async function sendVideo(filePath, seconds) {
     const data = await res.text();
     log(`Replay OK (${data.length} bytes)`);
 
-    const renderer = new RendererApp();
+    renderer = new RendererApp();
     // v2.1: app.on("ready") can silently hang if ready already fired (race on fast runners)
     // — whenReady() always resolves. This was the cause of renders hanging until the job timeout.
     log("Waiting for Electron to be ready…");
@@ -122,13 +145,18 @@ async function sendVideo(filePath, seconds) {
       if (!shell) return;
       const buffer = base64 && Buffer.from(base64, "base64");
       if (shell.stdin.writable) {
-        if (buffer) shell.stdin.write(buffer);
-        else {
+        if (buffer) {
+          STATS.buffers++;
+          STATS.bytes += buffer.length;
+          shell.stdin.write(buffer);
+        } else {
           log("A fechar stdin do ffmpeg");
           shell.stdin.end();
           try { tab.window && tab.window.destroy(); } catch {}
           delete renderer.tabs[hash];
         }
+      } else if (buffer) {
+        STATS.dropped++; // ffmpeg morreu — sem isto o render continuava a "andar" às cegas
       }
     });
 
@@ -145,26 +173,64 @@ async function sendVideo(filePath, seconds) {
       config: INPUT_CONFIG,
     };
 
+    TASK_HASH = task.hash;
     fs.writeFileSync(path.join(QUEUE_PATH, `${task.hash}.vanis`), data);
 
     const startTime = Date.now();
+    let shownPct = 0;
+    let lastPatchAt = 0;
+    let lastLogAt = 0;
     const done = new Promise((resolve, reject) => {
       renderer.addTask(task, {
         onBegin: async () => { log("Render a começar"); },
         onProgress: async (p) => {
-          const pct = Math.round(p * 100);
-          if (pct >= lastPct + 10 || (pct === 100 && lastPct !== 100)) {
-            lastPct = pct;
-            if (progressMessageId) whPatch(progressMessageId, { embeds: [barEmbed(p)] });
+          const pct = Math.max(0, Math.min(100, Math.round(p * 100)));
+          STATS.lastPct = pct;
+          const now = Date.now();
+          if (now - lastLogAt >= 15000) {
+            lastLogAt = now;
+            log(`progress: ${renderStats()}`);
+          }
+          // atualiza a barra a cada +5% ou a cada 45 s — o padrão antigo (+10% só quando
+          // crescia) fazia a barra parecer "presa" (ex.: nos 88%) durante o encode final
+          if (progressMessageId && pct > shownPct && (pct - shownPct >= 5 || now - lastPatchAt >= 45000)) {
+            shownPct = pct;
+            lastPatchAt = now;
+            whPatch(progressMessageId, { embeds: [barEmbed(pct / 100)] });
           }
         },
         onError: async (err) => reject(new Error(String(err))),
         onFinish: async () => resolve(),
       });
     });
+    // se o deadline abortar, o `done` rejeita depois — sem isto o Node podia crashar
+    // antes de a mensagem de erro chegar ao Discord (unhandled rejection)
+    done.catch(() => {});
 
     renderer.exec();
-    await done;
+
+    // heartbeat a cada 30 s: mostra nos logs se os frames continuam a chegar mesmo
+    // quando a barra do Discord não se mexe
+    const heartbeat = setInterval(() => log(`heartbeat: ${renderStats()}`), 30000);
+
+    // limite duro: se o render passar disto, aborta E AVISA no Discord — sem isto o
+    // GitHub matava o job no timeout (2 h) e nenhuma mensagem de erro chegava ao canal
+    const HARD_LIMIT_MIN = 40;
+    let deadlineTimer;
+    const deadline = new Promise((_, rej) => {
+      deadlineTimer = setTimeout(() => {
+        const msg = `Render stopped: it exceeded the **${HARD_LIMIT_MIN} min** hard limit (last progress **${STATS.lastPct}%**).\nTry a shorter clip or \`--res 720 --fps 30 --quality low\`.`;
+        try { renderer.abortTask(TASK_HASH, msg); } catch {}
+        rej(new Error(msg));
+      }, HARD_LIMIT_MIN * 60 * 1000);
+    });
+
+    try {
+      await Promise.race([done, deadline]);
+    } finally {
+      clearTimeout(deadlineTimer);
+      clearInterval(heartbeat);
+    }
 
     const outPath = path.join(renderer.OUTPUT_PATH, `${task.hash}.mp4`);
     if (!fs.existsSync(outPath)) throw new Error("ffmpeg finished but the mp4 file doesn't exist");
@@ -182,7 +248,7 @@ async function sendVideo(filePath, seconds) {
           embeds: [new (require("discord.js").EmbedBuilder)()
             .setTitle(`${INPUT_FILENAME}.mp4 (error)`)
             .setColor(0xFF0000)
-            .setDescription(String(e.message || e).slice(0, 3900))
+            .setDescription((String(e.message || e) + "\n\n" + renderStats()).slice(0, 3900))
             .setTimestamp()],
         };
         if (progressMessageId) await whPatch(progressMessageId, payload);
