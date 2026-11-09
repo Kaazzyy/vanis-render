@@ -475,7 +475,7 @@ async (_, hash, data, config) => {
         showBackgroundImage: true,
         backgroundImageUrl: "assets/bg.png",
         backgroundImageRepeat: true,
-        backgroundImageOpacity: 1,
+        backgroundImageOpacity: .6,
         backgroundColor: 1052688,
         backgroundDefaultIfUnequal: true
     };
