@@ -67,3 +67,14 @@ jobs:
           INPUT_USER_ID: ${{ github.event.inputs.user_id }}
           INPUT_FILENAME: ${{ github.event.inputs.filename }}
         run: xvfb-run -a npx electron . --no-sandbox --disable-gpu --disable-dev-shm-usage
+
+      # v2.3: se o job falhar ANTES de o worker conseguir avisar (ex.: falha no
+      # apt/npm, como o run #8), o Discord ficava sem nenhuma mensagem. Este
+      # passo envia um aviso simples sempre que o job acaba em falha.
+      - name: Notify Discord when the job fails
+        if: failure()
+        env:
+          WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          curl -sf -X POST "$WEBHOOK_URL" -H 'Content-Type: application/json' \
+            -d '{"content":"❌ The Actions render job failed (setup/install step or worker crash). Check the run log on GitHub for details."}' || true
