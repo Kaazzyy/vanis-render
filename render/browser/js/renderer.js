@@ -475,8 +475,8 @@ async (_, hash, data, config) => {
         showBackgroundImage: true,
         backgroundImageUrl: "assets/bg.png",
         backgroundImageRepeat: true,
-        backgroundImageOpacity: .6,
-        backgroundColor: 1052688,
+        backgroundImageOpacity: 1,
+        backgroundColor: 0,
         backgroundDefaultIfUnequal: true
     };
     window.setSkinMode = mode => {
@@ -1090,7 +1090,13 @@ async (_, hash, data, config) => {
             n.drawRect(0, 0, x, a),
             n.endFill(),
             n.position.set(-e, -t),
-            this.background.addChild(n)
+            this.background.addChild(n);
+            var f = new (PIXI.Graphics);
+            f.beginFill(1114111, 1),
+            f.drawRect(0, 0, x, a),
+            f.endFill(),
+            f.position.set(-e, -t),
+            this.background.addChildAt(f, 0)
         }
         toggleBackgroundImage(x) {
             x && !this.backgroundSprite ? this.setBackgroundImage(t.backgroundImageUrl, t.backgroundImageRepeat) : x || this.destroyBackgroundImage(true)
