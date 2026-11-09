@@ -232,6 +232,10 @@ module.exports = class RendererApp {
             '-i', '-',
             '-profile:v', 'baseline',
             '-crf', {"high":"10","medium":"23","low":"40"}[config.quality],
+            // v2.2: veryfast em vez do preset por omissão (medium) — no runner de 4 vCPU o
+            // medium não chegava a 60 fps em 1080p, o backlog acumulava no stdin e os
+            // últimos ~12% do render demoravam uma eternidade (barra "presa" perto do fim)
+            '-preset', 'veryfast',
             '-pix_fmt', 'yuv420p',
             '-c:v', 'libx264',
             Path.resolve(OUTPUT_PATH, `${task.hash}.mp4`)];
