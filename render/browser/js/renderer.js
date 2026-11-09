@@ -476,7 +476,7 @@ async (_, hash, data, config) => {
         backgroundImageUrl: "assets/bg.png",
         backgroundImageRepeat: true,
         backgroundImageOpacity: 1,
-        backgroundColor: 0,
+        backgroundColor: 1184274, // v2.7: fora da borda #121212 — mais claro que o mapa (valor original do jogo web)
         backgroundDefaultIfUnequal: true
     };
     window.setSkinMode = mode => {
@@ -1092,7 +1092,7 @@ async (_, hash, data, config) => {
             n.position.set(-e, -t),
             this.background.addChild(n);
             var f = new (PIXI.Graphics);
-            f.beginFill(1114111, 1),
+            f.beginFill(1052688, 1), // v2.7: base do mapa #101010 por baixo da textura — fora da borda fica #121212, mais claro
             f.drawRect(0, 0, x, a),
             f.endFill(),
             f.position.set(-e, -t),
