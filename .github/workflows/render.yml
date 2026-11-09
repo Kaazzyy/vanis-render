@@ -39,17 +39,19 @@ jobs:
           node-version: "20"
 
       # dependências do Chromium/Electron no runner Ubuntu
+      # v2.4: fonts-ubuntu — os textos do jogo (PIXI.Text) usam a font "Ubuntu";
+      # sem ela o fontconfig troca por DejaVu e os clips ficam com outra letra
       - name: Install system deps
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            xvfb ffmpeg fonts-liberation fontconfig \
+            xvfb ffmpeg fonts-liberation fonts-ubuntu fontconfig \
             libgtk-3-0 libnss3 libasound2t64 libatk1.0-0 libatk-bridge2.0-0 \
             libcups2 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 \
             libxfixes3 libxrandr2 libgbm1 libpango-1.0-0 libcairo2 \
             libxss1 libxtst6 libnotify4 libsecret-1-0 libxshmfence1 \
           || sudo apt-get install -y --no-install-recommends \
-            xvfb ffmpeg fonts-liberation fontconfig \
+            xvfb ffmpeg fonts-liberation fonts-ubuntu fontconfig \
             libgtk-3-0 libnss3 libasound2 libatk1.0-0 libatk-bridge2.0-0 \
             libcups2 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 \
             libxfixes3 libxrandr2 libgbm1 libpango-1.0-0 libcairo2 \
@@ -66,7 +68,9 @@ jobs:
           INPUT_CONFIG: ${{ github.event.inputs.config }}
           INPUT_USER_ID: ${{ github.event.inputs.user_id }}
           INPUT_FILENAME: ${{ github.event.inputs.filename }}
-        run: xvfb-run -a npx electron . --no-sandbox --disable-gpu --disable-dev-shm-usage
+        # v2.4: --disable-gpu REMOVIDO — matava o WebGL (SwiftShader falhava) e o
+        # jogo caía para o renderer Canvas, sem imagem de fundo nem borda visível
+        run: xvfb-run -a npx electron . --no-sandbox --disable-dev-shm-usage
 
       # v2.3: se o job falhar ANTES de o worker conseguir avisar (ex.: falha no
       # apt/npm, como o run #8), o Discord ficava sem nenhuma mensagem. Este
