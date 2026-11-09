@@ -1187,7 +1187,7 @@ async (_, hash, data, config) => {
       , _ = e(111).basic
       , i = t.cellSize
       , r = {
-        fontFamily: "Hind Madurai",
+        fontFamily: "Ubuntu", // v2.4: era "Hind Madurai" (webfont nao carregada no runner — caia para DejaVu)
         fontSize: 80,
         lineJoin: "round",
         fill: 16777215,
@@ -1357,7 +1357,7 @@ async (_, hash, data, config) => {
 , function(x, a) {
     function e(x, a, e) {
         return new (PIXI.Text)(x,{
-            fontFamily: "Verdana",
+            fontFamily: "Ubuntu", // v2.4: era "Verdana" (nao existe no runner)
             fontSize: a,
             lineJoin: "round",
             fill: e || 16777215
@@ -1469,7 +1469,7 @@ async (_, hash, data, config) => {
             t.addChild(n),
             a) {
                 var _ = new PIXI.Text(a,{
-                    fontFamily: "Nunito",
+                    fontFamily: "Ubuntu", // v2.4: era "Nunito" (webfont nao carregada no runner)
                     fill: 16777215,
                     fontSize: 12
                 });
