@@ -22,6 +22,17 @@ const QUEUE_PATH = path.resolve(__dirname, "queue");
 
 function log(...a) { console.log("[Worker]", ...a); }
 
+// v2.3 FIX (crítico): quando o render termina, o worker destrói a janela do Electron
+// (a linha "A fechar stdin do ffmpeg"). Sem handler para "window-all-closed", o
+// comportamento DEFAULT do Electron é SAIR da app — o processo morria nesse exato
+// momento, ANTES de o ffmpeg terminar de escrever o mp4 e ANTES do sendVideo():
+// o job ficava verde ("Success"), sem vídeo e sem erro. Subscrever o evento
+// desativa o quit automático; quem termina o processo é sempre o
+// app.exit(exitCode) no finally do main.
+app.on("window-all-closed", () =>
+  log("All windows closed — keeping the worker alive until the video is delivered."),
+);
+
 // ---------- helpers de webhook ----------
 async function whPost(payload) {
   const res = await fetch(`${WEBHOOK}?wait=true`, {
