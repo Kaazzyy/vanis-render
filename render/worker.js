@@ -40,7 +40,8 @@ async function whPatch(id, payload) {
       body: JSON.stringify(payload),
     });
     if (!res.ok) log(`webhook PATCH ${res.status}`);
-  } catch (e) { log("PATCH falhou:", e.message); }
+    return res.ok;
+  } catch (e) { log("PATCH falhou:", e.message); return false; }
 }
 function barEmbed(pct, title) {
   const p = Math.max(0, Math.min(1, pct));
@@ -238,7 +239,15 @@ async function sendVideo(filePath, seconds) {
     log("A enviar vídeo:", outPath, `${(fs.statSync(outPath).size / 1048576).toFixed(1)}MB`);
 
     await sendVideo(outPath, seconds);
-    if (progressMessageId) whPatch(progressMessageId, { embeds: [barEmbed(1)] });
+    // estado final da barra — e se o PATCH falhar (a causa das barras "congeladas"
+    // nos 87/88/93%), envia uma mensagem nova a confirmar, para o canal nunca ficar
+    // com uma barra parada sem explicação
+    const patched = progressMessageId
+      ? await whPatch(progressMessageId, { embeds: [barEmbed(1, `${INPUT_FILENAME}.mp4 (done)`)] })
+      : false;
+    if (!patched) {
+      await whPost({ content: `✅ **${INPUT_FILENAME}.mp4** finished — the video is in the message above. (The progress bar message couldn't be updated.)` }).catch(() => {});
+    }
     exitCode = 0;
   } catch (e) {
     console.error("[Worker] FALHOU:", e);
@@ -251,8 +260,8 @@ async function sendVideo(filePath, seconds) {
             .setDescription((String(e.message || e) + "\n\n" + renderStats()).slice(0, 3900))
             .setTimestamp()],
         };
-        if (progressMessageId) await whPatch(progressMessageId, payload);
-        else await whPost(payload);
+        const patchedErr = progressMessageId ? await whPatch(progressMessageId, payload) : false;
+        if (!patchedErr) await whPost(payload);
       }
     } catch {}
   } finally {
