@@ -476,7 +476,7 @@ async (_, hash, data, config) => {
         backgroundImageUrl: "assets/bg.png",
         backgroundImageRepeat: true,
         backgroundImageOpacity: .6,
-        backgroundColor: 1184274,
+        backgroundColor: 16777215,
         backgroundDefaultIfUnequal: true
     };
     window.setSkinMode = mode => {
