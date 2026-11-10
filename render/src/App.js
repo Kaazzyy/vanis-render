@@ -246,6 +246,18 @@ module.exports = class RendererApp {
             // medium não chegava a 60 fps em 1080p, o backlog acumulava no stdin e os
             // últimos ~12% do render demoravam uma eternidade (barra "presa" perto do fim)
             '-preset', 'veryfast',
+            // v2.11: CORREÇÃO CRÍTICA DE GAMA DE COR — "fundo/borda invisíveis".
+            // Os frames chegam do toDataURL('image/jpeg') como JPEG FULL-RANGE
+            // (yuvj420p). Sem conversão explícita, o ffmpeg copia os valores Y para
+            // o H.264 e tagga o vídeo como fullrange=1 — mas o player do Discord
+            // (Chromium) e a maioria dos players ASSUMEM limited range e esmagam
+            // tudo com luma <= 16 a preto puro: fundo #101010 (Y16) -> rgb(0),
+            // textura (Y12) -> rgb(0), borda (Y0) -> rgb(0). As células coloridas
+            // sobrevivem (luma alta) — daí o vídeo "tudo escuro sem borda nem bg".
+            // Convertendo full->tv aqui, o fundo fica Y30 e TODOS os players
+            // mostram os valores reais do jogo: fundo rgb(16), textura rgb(12),
+            // borda rgb(0) — paridade exata com o cliente vanis.
+            '-vf', 'scale=in_range=full:out_range=tv',
             '-pix_fmt', 'yuv420p',
             '-c:v', 'libx264',
             Path.resolve(OUTPUT_PATH, `${task.hash}.mp4`)];
