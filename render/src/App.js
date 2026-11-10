@@ -58,7 +58,7 @@ module.exports = class RendererApp {
             skin:    "all",
             name:    "all",
             mass:    "short",
-            quality: "medium",
+            quality: "high", // v2.9: high por omissao — o crf 23 esbatia as linas do bg (padrao subtil de 4 niveis)
         }
     }
 
@@ -237,7 +237,11 @@ module.exports = class RendererApp {
             '-framerate', config.fps,
             '-i', '-',
             '-profile:v', 'baseline',
-            '-crf', {"high":"10","medium":"23","low":"40"}[config.quality],
+            '-crf', {"high":"15","medium":"18","low":"30"}[config.quality],
+            // v2.9: crf recalibrado. O antigo medium=23 esmagava o padrao hexagonal do bg
+            // (juntas 16 vs celulas 12 = só 4 niveis) — depois do encode as linhas ficavam
+            // em 13-14 e o video parecia "tudo da mesma cor". com crf 15/18 o padrao sobrevive.
+            // nota: ficheiros ~2x maiores; clips longos vao para o DropBox (--res 720 / --fps 30 ajuda)
             // v2.2: veryfast em vez do preset por omissão (medium) — no runner de 4 vCPU o
             // medium não chegava a 60 fps em 1080p, o backlog acumulava no stdin e os
             // últimos ~12% do render demoravam uma eternidade (barra "presa" perto do fim)
