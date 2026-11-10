@@ -1,5 +1,24 @@
 /** @param {RenderConfig} config */
 
+// =====================================================================
+// v2.10 — fundo e borda à prova de falha, paridade exata com o jogo:
+//   * textura de fundo EMBUTIDA abaixo (a img/background.png real do cliente
+//     vanis, md5 1052cf2004b2a5f9ce4c18b1840e3dcd). Como data URI nunca depende
+//     de rede, caminho relativo, file:// ou CORS — se o assets/bg.png falhar
+//     por qualquer motivo no Actions, o fallback entra automaticamente.
+//   * setBackgroundImage agora VALIDA a imagem (naturalWidth): o ImageLoader
+//     devolve {} (truthy) quando o carregamento falha, o que antes criava uma
+//     PIXI.BaseTexture({}) sem pixels — fundo invisível.
+//   * setupStage protege setBackgroundImage com try/catch: o setBorder() corre
+//     SEMPRE, mesmo que o fundo falhe.
+//   * backgroundImageOpacity = .6 — o valor exato do cliente real (main.js).
+//   * [BG-DIAG] no 1º frame: mostra nos logs do Actions o renderer (WebGL/Canvas),
+//     a textura ativa, as dimensões do mapa e amostras de pixels (canto/centro).
+// =====================================================================
+// NOTA: o ficheiro chama-se background.png mas é WEBP lossless (RIFF) —
+// o Chromium decodifica pelo conteúdo; usamos o MIME correto no data URI.
+window.VANIS_BG_DATA_URI = "data:image/webp;base64," + "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";
+
 // === FIX PARA browser/index.html - COLAR NO FINAL DO setConfig ===
 
 const CAMERA_MOVE_RATE = 3.08;
@@ -70,6 +89,26 @@ async (_, hash, data, config) => {
 
         let buffer = await tick(0);
         setConfig(config);
+
+        // v2.10: diagnóstico do 1º frame — aparece nos logs do Actions
+        // ([Browser log] ...). Se o video sair "tudo da mesma cor", estas amostras
+        // dizem logo se o problema é textura ausente, renderer errado ou mapa inválido.
+        try {
+            game.renderer.render(game.stage);
+            const dc = document.createElement("canvas");
+            dc.width = 32, dc.height = 18;
+            const dg = dc.getContext("2d");
+            dg.drawImage(game.renderer.view, 0, 0, 32, 18);
+            const dd = dg.getImageData(0, 0, 32, 18).data
+              , px = i => dd[4 * i] + "," + dd[4 * i + 1] + "," + dd[4 * i + 2]
+              , bs = game.scene && game.scene.backgroundSprite;
+            console.log("[BG-DIAG] renderer=" + (game.renderer.type === PIXI.RENDERER_TYPE.WEBGL ? "WebGL" : "Canvas")
+                + " sprite=" + (bs ? bs.texture.baseTexture.width + "x" + bs.texture.baseTexture.height + " alpha=" + bs.alpha : "AUSENTE")
+                + " mapa=" + (game.border && game.border.width + "x" + game.border.height)
+                + " px canto=" + px(0) + " meio-topo=" + px(16 * 18 + 0) + " centro=" + px(9 * 32 + 16));
+        } catch (e) {
+            console.log("[BG-DIAG] falhou: " + (e && e.message || e));
+        }
 
         let frame = 0;
         const render = async () => {
@@ -293,7 +332,14 @@ async (_, hash, data, config) => {
         var x = v.stage = new PIXI.Container
           , a = v.scene = new i(v.border);
         if (n.showBackgroundImage && n.backgroundImageUrl) {
-            await a.setBackgroundImage(n.backgroundImageUrl, n.backgroundImageRepeat);
+            // v2.10: se o fundo falhar por qualquer motivo, o setBorder() e o resto
+            // do palco NAO podem morrer com ele — sem isto, um erro aqui deixava
+            // o video todo na cor de fundo (sem borda, sem textura, sem celulas).
+            try {
+                await a.setBackgroundImage(n.backgroundImageUrl, n.backgroundImageRepeat);
+            } catch (e) {
+                console.error("[BG] setBackgroundImage falhou: " + (e && e.message || e));
+            }
         }
         a.setBorder(),
         x.addChild(a.container),
@@ -475,7 +521,7 @@ async (_, hash, data, config) => {
         showBackgroundImage: true,
         backgroundImageUrl: "assets/bg.png",
         backgroundImageRepeat: true,
-        backgroundImageOpacity: .8, // v2.9: 0.8 — entre o jogo (0.6) e o Roblox (1.0); sobrevive ao encode e continua a parecer o jogo
+        backgroundImageOpacity: .6, // v2.10: 0.6 — o valor EXATO do jogo real (main.js do cliente vanis, linha 356)
         backgroundColor: 1052688, // v2.8: #101010 — igual ao jogo real (string2hex("101010"))
         backgroundDefaultIfUnequal: true
     };
@@ -1090,7 +1136,9 @@ async (_, hash, data, config) => {
             n.drawRect(0, 0, x, a),
             n.endFill(),
             n.position.set(-e, -t),
-            this.background.addChild(n)
+            this.background.addChild(n),
+            // v2.10: confirma nos logs do Actions que a borda foi desenhada
+            console.log("[BG] setBorder desenhado: " + x + "x" + a + " (linha preta 45px)")
         }
         toggleBackgroundImage(x) {
             x && !this.backgroundSprite ? this.setBackgroundImage(t.backgroundImageUrl, t.backgroundImageRepeat) : x || this.destroyBackgroundImage(true)
@@ -1099,10 +1147,20 @@ async (_, hash, data, config) => {
             if (this.border.width !== this.border.height && t.backgroundDefaultIfUnequal && (x = "assets/bg.png",
             a = true),
             x) {
-                // console.log(`Setting Background Image to ${x}`);
+                // v2.10: o ImageLoader devolve {} (truthy!) quando o carregamento
+                // falha — validar naturalWidth em vez de confiar no truthy.
                 let img = await new Promise(resolve => Loader.loadImage(x, resolve)).catch(console.error);
 
-                if (!img) return;
+                if (!img || !img.naturalWidth) {
+                    console.log("[BG] '" + x + "' nao carregou (img=" + (img && img.naturalWidth) + ") — a usar a textura EMBUTIDA do jogo");
+                    x = window.VANIS_BG_DATA_URI;
+                    img = await new Promise(resolve => Loader.loadImage(x, resolve)).catch(console.error);
+                }
+                if (!img || !img.naturalWidth) {
+                    console.error("[BG] nem a textura embutida carregou — o fundo fica sem padrao");
+                    return;
+                }
+                console.log("[BG] textura ok: " + img.naturalWidth + "x" + img.naturalHeight + " (fonte: " + (x === window.VANIS_BG_DATA_URI ? "data URI embutida" : x) + ")");
 
                 var e = this.border.width
                   , n = this.border.height
