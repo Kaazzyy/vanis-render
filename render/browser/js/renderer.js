@@ -475,7 +475,7 @@ async (_, hash, data, config) => {
         showBackgroundImage: true,
         backgroundImageUrl: "assets/bg.png",
         backgroundImageRepeat: true,
-        backgroundImageOpacity: .6, // v2.8: valor real do jogo (default do cliente vanis)
+        backgroundImageOpacity: .8, // v2.9: 0.8 — entre o jogo (0.6) e o Roblox (1.0); sobrevive ao encode e continua a parecer o jogo
         backgroundColor: 1052688, // v2.8: #101010 — igual ao jogo real (string2hex("101010"))
         backgroundDefaultIfUnequal: true
     };
