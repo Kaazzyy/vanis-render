@@ -551,3 +551,9 @@ module.exports = class RendererApp {
         }[res];
     }
 }
+
+// v27-hf: o worker (render/worker.js) corre o render sem chamar App.init(),
+// por isso precisa de acesso directo ao resolvedor de skins para registar ele
+// próprio o ipcMain.handle("vanis-skin"). Fica como propriedade estática da
+// classe exportada, sem mudar a forma como o App.js é usado pelo bot.
+module.exports.fetchRobloxSkin = fetchRobloxSkin;
