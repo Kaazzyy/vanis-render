@@ -38,6 +38,81 @@ app.commandLine.appendSwitch("allow-file-access-from-files");
 app.commandLine.appendSwitch("disable-renderer-backgrounding");
 app.commandLine.appendSwitch("disable-backgrounding-occluded-windows");
 
+// v2.11: Roblox skin assets ("rbxassetid://<id>") exported by the Roblox client.
+// The render page cannot load them (unknown scheme; and rbxcdn sends no CORS
+// headers for its crossOrigin=anonymous <img>). Node HERE has no CORS: resolve
+// the id to a PNG via thumbnails.roblox.com and hand the renderer a data URI.
+// The thumbnails API only allows ~1 request/second per IP (x-ratelimit
+// "1,1;w=1") and a clip creates several players at once, so the lookups run
+// through a SERIALIZED queue with a minimum gap and are retried on 429/5xx.
+// Successes are cached for the whole session; failures only for 60 s, so a
+// later clip may retry an asset that transiently failed.
+const SKIN_FETCH_TIMEOUT = 8000;
+const SKIN_MIN_GAP = 1100;        // ms between thumbnails API calls (429 guard)
+const SKIN_RETRIES = 3;           // extra attempts on 429/5xx/network errors
+const SKIN_FAIL_TTL = 60000;      // negative-cache lifetime (ms)
+const _skinCache = new Map();     // assetId -> { uri: string|null, at: ms }
+let _skinQueue = Promise.resolve();   // serializes the rate-limited API calls
+let _lastSkinApiAt = 0;           // when the last thumbnails API call started
+
+const _sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function fetchRobloxSkin(assetId) {
+    if (!/^\d+$/.test(assetId)) return null;
+    const now = Date.now();
+    const hit = _skinCache.get(assetId);
+    if (hit && (hit.uri || now - hit.at < SKIN_FAIL_TTL)) return hit.uri;
+    // queue the job so concurrent players never race the 1 req/s API budget
+    const job = _skinQueue.then(() => _resolveSkin(assetId));
+    _skinQueue = job.catch(() => {});
+    const uri = await job;
+    _skinCache.set(assetId, { uri: uri, at: Date.now() });
+    return uri;
+}
+
+async function _resolveSkin(assetId) {
+    let fetchFn = global.fetch;
+    if (!fetchFn) { try { fetchFn = require("node-fetch"); } catch (e) { fetchFn = null; } }
+    if (!fetchFn) { console.error("[vanis-skin] no fetch implementation available"); return null; }
+    let imageUrl = null;
+    // thumbnails.roblox.com lookup — paced + retried (429 = rate limited)
+    for (let attempt = 0; attempt <= SKIN_RETRIES && !imageUrl; attempt++) {
+        const wait = _lastSkinApiAt + SKIN_MIN_GAP - Date.now();
+        if (wait > 0) await _sleep(wait);
+        _lastSkinApiAt = Date.now();
+        try {
+            const res = await fetchFn(
+                "https://thumbnails.roblox.com/v1/assets?assetIds=" + assetId +
+                "&size=420x420&format=Png&isCircular=false",
+                { timeout: SKIN_FETCH_TIMEOUT });
+            if (res.status === 429 || res.status >= 500) throw new Error("API HTTP " + res.status);
+            if (!res.ok) { console.error("[vanis-skin] API HTTP " + res.status + " for asset " + assetId); return null; }
+            const meta = await res.json();
+            imageUrl = meta && meta.data && meta.data[0] && meta.data[0].imageUrl;
+            if (!imageUrl) return null;   // unknown / moderated asset: permanent
+        } catch (err) {
+            if (attempt >= SKIN_RETRIES) {
+                console.error("[vanis-skin] resolve failed for asset " + assetId + ": " + ((err && err.message) || err));
+                return null;
+            }
+            await _sleep(1200 + attempt * 1300);   // 1.2s, 2.5s, 3.8s backoff
+        }
+    }
+    if (!imageUrl) return null;
+    try {
+        const imgRes = await fetchFn(imageUrl, { timeout: SKIN_FETCH_TIMEOUT });
+        if (!imgRes.ok) throw new Error("cdn HTTP " + imgRes.status);
+        const buf = Buffer.from(await (imgRes.arrayBuffer ? imgRes.arrayBuffer() : imgRes.buffer()));
+        const type = ((imgRes.headers && imgRes.headers.get && imgRes.headers.get("content-type")) || "image/png").split(";")[0].toLowerCase();
+        if (buf.length > 0 && buf.length < 3 * 1024 * 1024) {
+            return "data:" + type + ";base64," + buf.toString("base64");
+        }
+    } catch (err) {
+        console.error("[vanis-skin] download failed for asset " + assetId + ": " + ((err && err.message) || err));
+    }
+    return null;
+}
+
 module.exports = class RendererApp {
 
     constructor() {
@@ -83,6 +158,10 @@ module.exports = class RendererApp {
 
         let frame = 0;
         ipcMain.on("render-error", (_, hash, msg) => this.abortTask(hash, msg));
+
+        // v2.11: see fetchRobloxSkin() above. The renderer asks for a data URI of
+        // every "rbxassetid://<id>" skin before trying to load it.
+        ipcMain.handle("vanis-skin", async (_, assetId) => fetchRobloxSkin(String(assetId)));
 
         ipcMain.on("buffer", (_, hash, base64) => {
             let tab = this.tabs[hash];
