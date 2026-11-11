@@ -422,7 +422,10 @@ async (_, hash, data, config) => {
 
         if (v.replayUpdateIndex > 0) {
             // let startTime = Date.now();
-            let buffer = window.targetCanvas.toDataURL('image/jpeg', 1);
+            // v2.8: q0.92 em vez de q1.0 — a arte do jogo e flat; JPEG q1.0 custava 2-3x
+            // os bytes e o CPU (capture + IPC + stdin + decode no ffmpeg) sem ganho visivel.
+            // Era um dos motores do backlog que deixa a barra "presa" no fim do render.
+            let buffer = window.targetCanvas.toDataURL('image/jpeg', 0.92);
             // ipcRenderer.send("debug", `${Date.now() - startTime}ms to get buffer`);
             return buffer;
         }
