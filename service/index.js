@@ -1,4 +1,6 @@
-// Vanis Service v2 — API de replays + mini-bot de escuta num só processo.
+// Vanis Service v2.1 — API de replays + mini-bot de escuta num só processo.
+// v2.1: watchdog anti-startup_failure — vigia cada run e avisa o Discord se o
+// GitHub morrer no arranque (antes ficava tudo calado).
 // Corre 24/7 no Render free (512MB chega: sem Electron, sem ffmpeg aqui).
 // O render pesado corre no GitHub Actions — este serviço só:
 //   1) recebe replays do Roblox (POST /api/replays)
@@ -197,6 +199,88 @@ async function dispatchWorkflow(inputs) {
   let detail = "";
   try { detail = (await res.text()).slice(0, 300); } catch {}
   throw new Error(`GitHub responded ${res.status}: ${detail}`);
+}
+
+// v2.1 watchdog: o GitHub às vezes mata um run com "startup_failure" (erro
+// interno do GitHub) ANTES de qualquer job correr — nenhum passo corre, logo o
+// aviso do render.yml também nunca corre e o utilizador fica sem saber nada.
+// Este watchdog vigia o run durante 12 min e:
+//   • startup_failure (1a vez) -> avisa no canal e volta a disparar sozinho
+//   • startup_failure (2a vez) -> avisa que é erro do GitHub e para
+//   • >12 min sem terminar    -> avisa que está preso na fila (com link)
+// success/failure não geram mensagens aqui: o worker já entrega o clip e o
+// render.yml já tem o aviso de falha — não duplicamos nada.
+let watchSeq = 0;
+// runs já "reclamados" por um watchdog — evita que dois watchRun peguem no
+// mesmo run quando há dois !render quase ao mesmo tempo (a API de dispatch do
+// GitHub não devolve o id do run, por isso temos de o adivinhar pela janela)
+const claimedRuns = new Set();
+function watchRun(channel, inputs, attempt, excludeIds) {
+  const startedAt = Date.now();
+  const deadline = startedAt + 12 * 60 * 1000;
+  const stagger = (watchSeq++ % 3) * 6000;
+  let runId = null;
+  const tick = async () => {
+    try {
+      const res = await ghApi("/actions/runs?event=workflow_dispatch&per_page=30");
+      if (!res.ok) throw new Error(`GitHub responded ${res.status}`);
+      const j = await res.json();
+      // ordem ASCENDENTE: o watchdog reclama o run mais antigo livre — assim,
+      // com dois !render quase seguidos, cada watchdog fica com o seu run
+      const runs = (j.workflow_runs || [])
+        .slice()
+        .sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+      let run = runs.find(r => !excludeIds.includes(r.id) && !claimedRuns.has(r.id) &&
+        new Date(r.created_at).getTime() >= startedAt - 60 * 1000);
+      if (runId) run = runs.find(r => r.id === runId) || run;
+      if (!run) {
+        if (Date.now() < deadline) { setTimeout(tick, 25000); }
+        return;
+      }
+      if (!runId) {
+        claimedRuns.add(run.id);
+        while (claimedRuns.size > 100) claimedRuns.delete(claimedRuns.values().next().value);
+      }
+      runId = run.id;
+      if (run.status !== "completed") {
+        if (Date.now() < deadline) { setTimeout(tick, 25000); return; }
+        // aviso de "preso" SÓ se nunca arrancou (queued). in_progress é o render
+        // a correr — a barra de progresso já informa e o timeout de 45 min do
+        // render.yml + aviso de falha cobrem o resto.
+        if (run.status === "queued") {
+          pushAlert(`Run ${run.id} stuck in queue >12min (never started)`);
+          if (channel && typeof channel.send === "function")
+            await channel.send(`⏳ The render of \`${inputs.code}\` has been stuck in the queue for over **12 minutes** without starting. Check: ${run.html_url}`).catch(() => {});
+        }
+        return;
+      }
+      if (run.conclusion === "startup_failure") {
+        pushAlert(`Run ${run.id} startup_failure (GitHub internal error) — attempt ${attempt}`);
+        if (attempt < 2) {
+          if (channel && typeof channel.send === "function")
+            await channel.send("⚠️ GitHub failed to start the render (**startup_failure** — an internal GitHub error, not a problem with your render). Retrying automatically in 20s…").catch(() => {});
+          setTimeout(async () => {
+            try {
+              await dispatchWorkflow(inputs);
+              watchRun(channel, inputs, attempt + 1, excludeIds.concat(run.id));
+            } catch (e) {
+              pushAlert(`Auto-retry dispatch failed: ${e.message}`);
+              if (channel && typeof channel.send === "function")
+                await channel.send(`❌ The automatic retry failed: ${e.message}\nPlease try \`!render\` again in a few minutes.`).catch(() => {});
+            }
+          }, 20000);
+        } else {
+          if (channel && typeof channel.send === "function")
+            await channel.send("❌ The render failed to start **twice** (**startup_failure** — a GitHub Actions service error, not your render). Please try `!render` again in a few minutes.\nGitHub status: https://www.githubstatus.com").catch(() => {});
+        }
+      }
+      // success/failure: o worker entrega o clip e o render.yml já avisa a falha.
+    } catch (e) {
+      if (Date.now() < deadline) { setTimeout(tick, 30000); return; }
+      pushAlert(`Watchdog gave up: ${e.message}`);
+    }
+  };
+  setTimeout(tick, 15000 + stagger);
 }
 
 async function uploadToOwnAPI(buffer) {
@@ -459,6 +543,13 @@ if (DISCORD_TOKEN) {
             .setDescription(`🎬 Render request from <@${message.author.id}> is in the queue.\nThe video will appear here when it's ready (it can take **several minutes**).`)
             .setTimestamp();
           await message.channel.send({ embeds: [embed] });
+          // v2.1: vigiar este run — se o GitHub morrer no arranque, avisar/retry
+          watchRun(message.channel, {
+            code: ds.code,
+            config: JSON.stringify(parsed.config),
+            user_id: message.author.id,
+            filename: ds.filename.replace(/\.vanis$/i, ""),
+          }, 1, []);
         } catch (e) {
           console.error("[Bot] dispatch falhou:", e.message);
           state.lastDispatch = { ok: false, code: ds.code, at: new Date().toISOString().slice(0, 19) + "Z", error: e.message };
