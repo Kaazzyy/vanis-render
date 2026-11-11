@@ -52,14 +52,14 @@ async function whPatch(id, payload) {
     return res.ok;
   } catch (e) { log("PATCH falhou:", e.message); return false; }
 }
-function barEmbed(pct, title) {
+function barEmbed(pct, title, stats) {
   const p = Math.max(0, Math.min(1, pct));
   const filled = Math.round(p * 19);
   const bar = "`[" + "=".repeat(filled) + ">" + " ".repeat(19 - filled) + "]`";
   return new (require("discord.js").EmbedBuilder)()
     .setTitle(title || `${INPUT_FILENAME}.mp4 (rendering)`)
     .setColor(0x00FFFF)
-    .setDescription(`${bar} **${Math.round(p * 100)}%**`)
+    .setDescription(`${bar} **${Math.round(p * 100)}%**` + (stats ? `\n\n\`${stats}\`` : ""))
     .setTimestamp();
 }
 
@@ -69,7 +69,8 @@ function barEmbed(pct, title) {
 // que "congela" é impossível de diagnosticar pelos logs.
 let renderer = null;
 let TASK_HASH = null;
-const STATS = { buffers: 0, dropped: 0, bytes: 0, lastPct: 0, startedAt: Date.now() };
+const STATS = { buffers: 0, dropped: 0, bytes: 0, lastPct: 0, startedAt: Date.now(),
+  lastBufferAt: Date.now(), lastProgressAt: Date.now(), stdinEnded: false };
 
 function renderStats() {
   let backlog = 0;
@@ -170,6 +171,7 @@ process.on("unhandledRejection", (e) => guardCrash("unhandledRejection", e));
       const tab = renderer.tabs[hash];
       if (!tab) return;
       tab.lastBuffer = Date.now();
+      STATS.lastBufferAt = Date.now();
       const shell = tab.shell;
       if (!shell) return;
       const buffer = base64 && Buffer.from(base64, "base64");
@@ -180,9 +182,14 @@ process.on("unhandledRejection", (e) => guardCrash("unhandledRejection", e));
           shell.stdin.write(buffer);
         } else {
           log("A fechar stdin do ffmpeg");
+          STATS.stdinEnded = true;
           shell.stdin.end();
           try { tab.window && tab.window.destroy(); } catch {}
           delete renderer.tabs[hash];
+          // v2.8: avisa logo no Discord que o jogo acabou e o ffmpeg esta a finalizar
+          if (progressMessageId)
+            whPatch(progressMessageId, { embeds: [barEmbed(STATS.lastPct / 100,
+              `${INPUT_FILENAME}.mp4 (finalizing)`, renderStats())] }).catch(() => {});
         }
       } else if (buffer) {
         STATS.dropped++; // ffmpeg morreu — sem isto o render continuava a "andar" às cegas
@@ -213,6 +220,7 @@ process.on("unhandledRejection", (e) => guardCrash("unhandledRejection", e));
       renderer.addTask(task, {
         onBegin: async () => { log("Render a começar"); },
         onProgress: async (p) => {
+          STATS.lastProgressAt = Date.now();
           const pct = Math.max(0, Math.min(100, Math.round(p * 100)));
           STATS.lastPct = pct;
           const now = Date.now();
@@ -238,9 +246,33 @@ process.on("unhandledRejection", (e) => guardCrash("unhandledRejection", e));
 
     renderer.exec();
 
-    // heartbeat a cada 30 s: mostra nos logs se os frames continuam a chegar mesmo
-    // quando a barra do Discord não se mexe
-    const heartbeat = setInterval(() => log(`heartbeat: ${renderStats()}`), 30000);
+    // v2.8: heartbeat — além do log, atualiza o Discord quando a barra está parada
+    // (drain final do encode) e aborta deadlocks reais: 3 min sem frames do jogo
+    // E sem progresso do ffmpeg = nada avança; o render seria eterno sem disto.
+    let _hbLastPct = -1;
+    let _hbLastPatch = 0;
+    const heartbeat = setInterval(() => {
+      const stats = renderStats();
+      log(`heartbeat: ${stats}`);
+      const now = Date.now();
+      const tabAlive = renderer && TASK_HASH && renderer.tabs[TASK_HASH];
+      if (tabAlive && now - STATS.lastBufferAt > 180000 && now - STATS.lastProgressAt > 180000) {
+        clearInterval(heartbeat);
+        const msg = `Render stopped: no new frames from the game AND no ffmpeg progress for **3 minutes** (last progress **${STATS.lastPct}%**) — a pipeline estava bloqueada.`;
+        try { renderer.abortTask(TASK_HASH, msg); } catch {}
+        return;
+      }
+      if (progressMessageId && now - _hbLastPatch >= 60000 && (STATS.stdinEnded || STATS.lastPct === _hbLastPct)) {
+        _hbLastPatch = now;
+        _hbLastPct = STATS.lastPct;
+        const title = STATS.stdinEnded
+          ? `${INPUT_FILENAME}.mp4 (finalizing — encoding the backlog)`
+          : `${INPUT_FILENAME}.mp4 (rendering)`;
+        whPatch(progressMessageId, { embeds: [barEmbed(STATS.lastPct / 100, title, stats)] });
+      } else if (STATS.lastPct !== _hbLastPct) {
+        _hbLastPct = STATS.lastPct;
+      }
+    }, 30000);
 
     // limite duro: se o render passar disto, aborta E AVISA no Discord — sem isto o
     // GitHub matava o job no timeout (2 h) e nenhuma mensagem de erro chegava ao canal
