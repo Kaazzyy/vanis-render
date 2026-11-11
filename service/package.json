@@ -1,12 +1,12 @@
 {
-  "name": "vanis-service",
+  "name": "vanis-render-service",
   "version": "2.0.0",
   "private": true,
   "type": "module",
-  "description": "Vanis API + mini-bot de escuta (24/7 no Render free)",
+  "main": "index.js",
   "dependencies": {
     "cors": "^2.8.5",
-    "discord.js": "^14.14.1",
-    "express": "^4.19.2"
+    "express": "^4.19.2",
+    "discord.js": "^14.14.1"
   }
 }
