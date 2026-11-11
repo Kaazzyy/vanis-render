@@ -90,8 +90,9 @@ module.exports = class RenderDiscordBot extends Client {
                 console.log("[Ignorado] Unknown Message em render");
                 return;
             }
-            this.disable();
-            this.reportToOwner(e ? (e.stack || e.message || String(e)) : "Unknown Error");
+            // v2.13: NAO desabilita o bot num erro inesperado — so reporta (max 1x/min).
+            // O disable() deixava o bot surdo a meio de um render (tarefas em pending).
+            this.reportErrThrottled(e);
         });
         process.on("unhandledRejection", e => {
             console.error(e);
@@ -99,8 +100,8 @@ module.exports = class RenderDiscordBot extends Client {
                 console.log("[Ignorado] Unknown Message rejection");
                 return;
             }
-            this.disable();
-            this.reportToOwner(e ? (e.stack || e.message || String(e)) : "Unknown Error");
+            // v2.13: NAO desabilita o bot num erro inesperado — so reporta (max 1x/min).
+            this.reportErrThrottled(e);
         });
     }
 
@@ -525,6 +526,14 @@ module.exports = class RenderDiscordBot extends Client {
             this.enable();
             this.reportToOwner("Bot is now **enabled**");
         }
+    }
+
+    // v2.13: relatorio de erro ao dono, no maximo 1x por minuto (evita spam de DMs)
+    reportErrThrottled(e) {
+        const now = Date.now();
+        if (now - (this._lastErrReportAt || 0) < 60000) return;
+        this._lastErrReportAt = now;
+        this.reportToOwner(e ? (e.stack || e.message || String(e)) : "Unknown Error");
     }
 
     disable() {
