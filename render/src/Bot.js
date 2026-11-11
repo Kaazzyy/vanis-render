@@ -399,14 +399,18 @@ module.exports = class RenderDiscordBot extends Client {
         let bar = 0;
         callbacks.onProgress = async progress => {
             try {
-                let newBar = Math.round(progress / 0.05);
+                // v27-hf: a barra tem 19 segmentos, mas progress/0.05 vai de 0 a 20.
+                // A partir dos 97.5% dava " ".repeat(19 - 20) -> RangeError, o catch
+                // engolia o erro e a barra congelava PARA SEMPRE nos 97% (nunca 98/99/100).
+                progress = Math.max(0, Math.min(1, Number(progress) || 0));
+                let newBar = Math.min(19, Math.round(progress * 19));
                 if (newBar != bar) {
-                    bar = Math.min(newBar, 19);
-                    embed.setDescription(`\`[${"=".repeat(bar)}>${" ".repeat(19 - newBar)}]\` **${Math.round(progress * 100)}%**`);
+                    bar = newBar;
+                    embed.setDescription(`\`[${"=".repeat(bar)}>${" ".repeat(19 - bar)}]\` **${Math.round(progress * 100)}%**`);
                     try { if (message) await message.edit({ embeds: [embed] }); } 
                     catch(e){ if(e.code !== 10008) console.error("[Edit Progress Error]", e.code, e.message); }
                 }
-            } catch (_) {}
+            } catch (e) { console.error("[onProgress Error]", e && e.message); }
         }
 
         callbacks.onError = error => {
