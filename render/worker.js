@@ -8,30 +8,28 @@ const fs = require("fs");
 const path = require("path");
 const uid = require("uid-safe");
 
-const RendererApp = require("./src/App");
+// v2.2: se o src/App.js commitado estiver corrompido (upload truncado no
+// GitHub, ficheiro trocado), este require MORRIA AQUI EM SILÉNCIO — fora do
+// try principal — e o Discord ficava eternamente no "(queued)" sem nenhuma
+// mensagem de erro. Agora o erro é guardado e posto no Discord mais abaixo.
+let RendererApp = null;
+let APP_LOAD_ERROR = null;
+try { RendererApp = require("./src/App"); }
+catch (e) { APP_LOAD_ERROR = e; }
 
 const API_BASE = (process.env.API_BASE || "").replace(/\/+$/, "");
 const WEBHOOK = (process.env.WEBHOOK_URL || "").replace(/\/+$/, "");
 const INPUT_CODE = process.env.INPUT_CODE || "";
 const INPUT_USER = process.env.INPUT_USER_ID || "";
 const INPUT_FILENAME = (process.env.INPUT_FILENAME || INPUT_CODE || "clip").replace(/[^\w.-]/g, "_");
-const INPUT_CONFIG = JSON.parse(process.env.INPUT_CONFIG || "{}");
+let INPUT_CONFIG = {};
+try { INPUT_CONFIG = JSON.parse(process.env.INPUT_CONFIG || "{}"); }
+catch (e) { console.error("[Worker] INPUT_CONFIG invalido, a usar {}:", e.message); }
 
 const OUTPUT_PATH = path.resolve(__dirname, "output");
 const QUEUE_PATH = path.resolve(__dirname, "queue");
 
 function log(...a) { console.log("[Worker]", ...a); }
-
-// v2.3 FIX (crítico): quando o render termina, o worker destrói a janela do Electron
-// (a linha "A fechar stdin do ffmpeg"). Sem handler para "window-all-closed", o
-// comportamento DEFAULT do Electron é SAIR da app — o processo morria nesse exato
-// momento, ANTES de o ffmpeg terminar de escrever o mp4 e ANTES do sendVideo():
-// o job ficava verde ("Success"), sem vídeo e sem erro. Subscrever o evento
-// desativa o quit automático; quem termina o processo é sempre o
-// app.exit(exitCode) no finally do main.
-app.on("window-all-closed", () =>
-  log("All windows closed — keeping the worker alive until the video is delivered."),
-);
 
 // ---------- helpers de webhook ----------
 async function whPost(payload) {
@@ -129,6 +127,11 @@ async function sendVideo(filePath, seconds) {
   let progressMessageId = null;
 
   try {
+    // v2.2: se o require("./src/App") falhou lá em cima, é AQUI que o erro
+    // chega ao Discord — antes ficávamos só com a mensagem "(queued)".
+    if (APP_LOAD_ERROR)
+      throw new Error("render/src/App.js failed to load: " + APP_LOAD_ERROR.message +
+        "\nThe file is probably corrupted/truncated from the GitHub upload — re-upload it whole.");
     if (!API_BASE || !WEBHOOK || !INPUT_CODE) {
       throw new Error("Missing env: API_BASE, WEBHOOK_URL and INPUT_CODE are required.");
     }
