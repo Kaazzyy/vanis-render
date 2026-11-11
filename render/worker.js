@@ -8,6 +8,16 @@ const fs = require("fs");
 const path = require("path");
 const uid = require("uid-safe");
 
+// v27-hf: BUG QUE MATAVA TODO O RENDER NO FIM.
+// No ultimo frame o App.js faz tab.window.destroy() (fecha a janela do render).
+// Como só existe UMA janela, o Electron dispara "window-all-closed" e, sem
+// listener, o comportamento por omissao e app.quit(): o processo saía com
+// codigo 0 ANTES de o worker correr sendVideo(). Resultado: o run ficava verde,
+// o clip saía da fila como se tivesse sido entregue, a barra congelava no
+// ultimo valor (~97%, o que o ffmpeg tinha codificado quando o jogo acabou) e o
+// video nunca aparecia no Discord. Este listener desliga o quit automatico.
+app.on("window-all-closed", () => {});
+
 // v2.2: se o src/App.js commitado estiver corrompido (upload truncado no
 // GitHub, ficheiro trocado), este require MORRIA AQUI EM SILÉNCIO — fora do
 // try principal — e o Discord ficava eternamente no "(queued)" sem nenhuma
@@ -93,17 +103,28 @@ async function sendVideo(filePath, seconds) {
   let sendPath = filePath;
   let size = fs.statSync(sendPath).size;
 
-  // se o mp4 for grande demais para o webhook, re-comprime uma vez
+  // se o mp4 for grande demais para o webhook, re-comprime.
+  // v27-hf: o CRF 33 sozinho nao chega para um 1080p60 longo — o clip ficava
+  // sem ser entregue. Segunda tentativa a 720p garante que sai sempre video.
   if (size > MAX) {
-    log(`mp4 tem ${(size / 1048576).toFixed(1)}MB — a re-comprimir (CRF 33)`);
-    const heavy = path.join(OUTPUT_PATH, INPUT_FILENAME + "_small.mp4");
     const { spawnSync } = require("child_process");
-    const r = spawnSync("ffmpeg", [
-      "-y", "-i", filePath, "-c:v", "libx264", "-crf", "33",
-      "-preset", "fast", "-pix_fmt", "yuv420p", "-movflags", "+faststart", heavy,
-    ], { stdio: "ignore" });
-    if (r.status === 0 && fs.existsSync(heavy)) sendPath = heavy;
-    size = fs.statSync(sendPath).size;
+    const heavy = path.join(OUTPUT_PATH, INPUT_FILENAME + "_small.mp4");
+    const tries = [
+      { crf: "33", extra: [] },
+      { crf: "30", extra: ["-vf", "scale=-2:720"] },
+    ];
+    for (const t of tries) {
+      log(`mp4 tem ${(size / 1048576).toFixed(1)}MB — a re-comprimir (CRF ${t.crf}${t.extra.length ? ", 720p" : ""})`);
+      const r = spawnSync("ffmpeg", [
+        "-y", "-i", filePath, ...t.extra, "-c:v", "libx264", "-crf", t.crf,
+        "-preset", "fast", "-pix_fmt", "yuv420p", "-movflags", "+faststart", heavy,
+      ], { stdio: "ignore" });
+      if (r.status === 0 && fs.existsSync(heavy)) {
+        sendPath = heavy;
+        size = fs.statSync(sendPath).size;
+      }
+      if (size <= MAX) break;
+    }
   }
 
   if (size > 8 * 1024 * 1024) {
