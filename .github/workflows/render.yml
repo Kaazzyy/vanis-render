@@ -43,15 +43,25 @@ jobs:
       # sem ela o fontconfig troca por DejaVu e os clips ficam com outra letra
       - name: Install system deps
         id: sysdeps
+        # v2.7: o apt-get pode ficar PENDURADO — o run #37 passou 45 min no
+        # "Install system deps" ate o timeout do job o matar, sem renderizar e
+        # sem mensagem nenhuma no Discord. 3 protecoes:
+        #  1) unattended-upgrades parado — e o processo que costuma segurar o lock
+        #     do dpkg no runner e fazer o apt esperar para sempre
+        #  2) DPkg::Lock::Timeout=60 — se o lock continuar ocupado, o apt FALHA em
+        #     60s em vez de esperar infinito (a 2a tentativa corre logo a seguir)
+        #  3) timeout 240/480 — rede presa morre em minutos; se tudo falhar o
+        #     passo acaba em falha e o "Notify Discord" avisa o canal
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          sudo systemctl stop unattended-upgrades.service 2>/dev/null || true
+          sudo timeout 240 apt-get -o DPkg::Lock::Timeout=60 update || sudo timeout 240 apt-get -o DPkg::Lock::Timeout=60 update || true
+          sudo timeout 480 apt-get -o DPkg::Lock::Timeout=60 install -y --no-install-recommends \
             xvfb ffmpeg fonts-liberation fonts-ubuntu fontconfig \
             libgtk-3-0 libnss3 libasound2t64 libatk1.0-0 libatk-bridge2.0-0 \
             libcups2 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 \
             libxfixes3 libxrandr2 libgbm1 libpango-1.0-0 libcairo2 \
             libxss1 libxtst6 libnotify4 libsecret-1-0 libxshmfence1 \
-          || sudo apt-get install -y --no-install-recommends \
+          || sudo timeout 480 apt-get -o DPkg::Lock::Timeout=60 install -y --no-install-recommends \
             xvfb ffmpeg fonts-liberation fonts-ubuntu fontconfig \
             libgtk-3-0 libnss3 libasound2 libatk1.0-0 libatk-bridge2.0-0 \
             libcups2 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 \
@@ -61,7 +71,9 @@ jobs:
       - name: Install npm deps
         id: npmdeps
         # 2a tentativa: falhas transitorias de registry / download do Electron
-        run: npm install --no-audit --no-fund || npm install --no-audit --no-fund
+        # v2.7: timeout 8 min por tentativa — um download do Electron preso morre
+        # e tenta outra vez, em vez de gastar sozinho o limite de 45 min do job
+        run: timeout 480 npm install --no-audit --no-fund || timeout 480 npm install --no-audit --no-fund
 
       - name: Render + send to Discord
         id: render
@@ -83,8 +95,12 @@ jobs:
       # v2.3: se o job falhar ANTES de o worker conseguir avisar (ex.: falha no
       # apt/npm, como o run #8), o Discord ficava sem nenhuma mensagem. Este
       # passo envia um aviso simples sempre que o job acaba em falha.
+      # v2.7: corre TAMBEM quando o job e CANCELADO. Quando o GitHub mata o job no
+      # timeout dos 45 min a conclusao e "cancelled", que o `failure()` sozinho
+      # nunca apanhava — era isto que deixava o Discord calado e a barra congelada
+      # ("presa nos 93%") sem explicacao nenhuma no canal.
       - name: Notify Discord when the job fails
-        if: failure()
+        if: failure() || cancelled()
         env:
           WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -93,9 +109,9 @@ jobs:
           RENDER_OUT: ${{ steps.render.outcome }}
         run: |
           STEP="unknown step"
-          if [ "$SYS_OUT" = "failure" ]; then STEP="Install system deps (apt-get)"; fi
-          if [ "$NPM_OUT" = "failure" ]; then STEP="Install npm deps"; fi
-          if [ "$RENDER_OUT" = "failure" ]; then STEP="Render + send to Discord (worker crash)"; fi
+          if [ "$SYS_OUT" = "failure" ] || [ "$SYS_OUT" = "cancelled" ]; then STEP="Install system deps (apt-get)"; fi
+          if [ "$NPM_OUT" = "failure" ] || [ "$NPM_OUT" = "cancelled" ]; then STEP="Install npm deps"; fi
+          if [ "$RENDER_OUT" = "failure" ] || [ "$RENDER_OUT" = "cancelled" ]; then STEP="Render + send to Discord (worker)"; fi
           export STEP
           PAYLOAD=$(python3 - <<'PYEOF'
           import json, os
@@ -107,7 +123,14 @@ jobs:
               tail = ""
           step = os.environ.get("STEP", "unknown step")
           url = os.environ.get("RUN_URL", "")
-          msg = "❌ The Actions render job failed at: **" + step + "**.\n"
+          outs = (os.environ.get("SYS_OUT", ""), os.environ.get("NPM_OUT", ""), os.environ.get("RENDER_OUT", ""))
+          if "failure" in outs:
+              msg = "❌ The Actions render job failed at: **" + step + "**.\n"
+          elif "cancelled" in outs:
+              msg = ("❌ The Actions render job was **cancelled** at: **" + step + "** — normally the **45-minute job limit** was hit (or the run was cancelled manually).\n"
+                     "The progress bar in the channel stays frozen; just try `!render` again.\n")
+          else:
+              msg = "❌ The Actions render job ended without success at: **" + step + "**.\n"
           if tail:
               msg += "Last log lines:\n```\n" + tail + "\n```\n"
           msg += "Run log: " + url
