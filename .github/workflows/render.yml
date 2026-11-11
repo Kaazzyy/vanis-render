@@ -42,6 +42,7 @@ jobs:
       # v2.4: fonts-ubuntu — os textos do jogo (PIXI.Text) usam a font "Ubuntu";
       # sem ela o fontconfig troca por DejaVu e os clips ficam com outra letra
       - name: Install system deps
+        id: sysdeps
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
@@ -58,9 +59,12 @@ jobs:
             libxss1 libxtst6 libnotify4 libsecret-1-0 libxshmfence1
 
       - name: Install npm deps
-        run: npm install --no-audit --no-fund
+        id: npmdeps
+        # 2a tentativa: falhas transitorias de registry / download do Electron
+        run: npm install --no-audit --no-fund || npm install --no-audit --no-fund
 
       - name: Render + send to Discord
+        id: render
         env:
           API_BASE: ${{ secrets.VANIS_API_BASE }}
           WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
@@ -79,6 +83,11 @@ jobs:
         if: failure()
         env:
           WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          curl -sf -X POST "$WEBHOOK_URL" -H 'Content-Type: application/json' \
-            -d '{"content":"❌ The Actions render job failed (setup/install step or worker crash). Check the run log on GitHub for details."}' || true
+          STEP="unknown step"
+          if [ "${{ steps.sysdeps.outcome }}" = "failure" ]; then STEP="Install system deps (apt-get)"; fi
+          if [ "${{ steps.npmdeps.outcome }}" = "failure" ]; then STEP="Install npm deps"; fi
+          if [ "${{ steps.render.outcome }}" = "failure" ]; then STEP="Render + send to Discord (worker crash)"; fi
+          PAYLOAD=$(printf '{"content":"❌ The Actions render job failed at: **%s**.\\nRun log: %s"}' "$STEP" "$RUN_URL")
+          curl -sf -X POST "$WEBHOOK_URL" -H 'Content-Type: application/json' -d "$PAYLOAD" || true
