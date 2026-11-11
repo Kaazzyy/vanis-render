@@ -276,7 +276,11 @@ process.on("unhandledRejection", (e) => guardCrash("unhandledRejection", e));
 
     // limite duro: se o render passar disto, aborta E AVISA no Discord — sem isto o
     // GitHub matava o job no timeout (2 h) e nenhuma mensagem de erro chegava ao canal
-    const HARD_LIMIT_MIN = 40;
+    // v2.9: 40 min de render + setup do job (apt/npm, ~5 min) = 45 min = timeout do
+    // job — o GitHub chegava a matar o worker ANTES deste limite disparar e a
+    // mensagem de erro nunca chegava. 35 min garante que o erro detalhado do
+    // worker (com o ultimo progresso e conselhos) ganha a corrida ao corte de 45.
+    const HARD_LIMIT_MIN = 35;
     let deadlineTimer;
     const deadline = new Promise((_, rej) => {
       deadlineTimer = setTimeout(() => {
