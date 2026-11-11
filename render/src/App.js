@@ -56,8 +56,7 @@ app.commandLine.appendSwitch("disable-backgrounding-occluded-windows");
 const SKIN_FETCH_TIMEOUT = 8000;
 const SKIN_MIN_GAP = 1100;        // ms between thumbnails API calls (429 guard)
 const SKIN_RETRIES = 3;           // extra attempts on 429/5xx/network errors
-const SKIN_FAIL_TTL = 60000;      // negative-cache lifetime (ms)
-const _skinCache = new Map();     // assetId -> { uri: string|null, at: ms }
+const _skinCache = new Map();     // assetId -> { uri: string, at: ms } (só sucessos)
 let _skinQueue = Promise.resolve();   // serializes the rate-limited API calls
 let _lastSkinApiAt = 0;           // when the last thumbnails API call started
 
@@ -88,14 +87,16 @@ async function fetchRobloxSkin(assetId) {
     // v2.11d: o ficheiro local ganha sempre (zero rede, zero 429 da API)
     const _loc = _localSkinUri(assetId);
     if (_loc) { _skinCache.set(assetId, { uri: _loc, at: Date.now() }); return _loc; }
-    const now = Date.now();
+    // v27-hf: NUNCA guardar falhas em cache. Um único 429 (o IP do runner é
+    // partilhado) ficava 60 s em cache e as 3 tentativas seguintes do renderer
+    // recebiam null instantâneo, desistiam, e a skin não aparecia no clip todo.
     const hit = _skinCache.get(assetId);
-    if (hit && (hit.uri || now - hit.at < SKIN_FAIL_TTL)) return hit.uri;
+    if (hit && hit.uri) return hit.uri;
     // queue the job so concurrent players never race the 1 req/s API budget
     const job = _skinQueue.then(() => _resolveSkin(assetId));
     _skinQueue = job.catch(() => {});
     const uri = await job;
-    _skinCache.set(assetId, { uri: uri, at: Date.now() });
+    if (uri) _skinCache.set(assetId, { uri: uri, at: Date.now() });
     return uri;
 }
 
@@ -404,7 +405,7 @@ module.exports = class RendererApp {
                 '-framerate', config.fps,
                 '-i', '-',
                 '-profile:v', 'baseline',
-                '-crf', {"high":"14","medium":"17","low":"26"}[config.quality],
+                '-crf', {"high":"15","medium":"18","low":"30"}[config.quality],
                 // v2.9: crf recalibrado. O antigo medium=23 esmagava o padrao hexagonal do bg
                 // (juntas 16 vs celulas 12 = só 4 niveis) — depois do encode as linhas ficavam
                 // em 13-14 e o video parecia "tudo da mesma cor". com crf 15/18 o padrao sobrevive.
@@ -412,11 +413,7 @@ module.exports = class RendererApp {
                 // v2.2: veryfast em vez do preset por omissão (medium) — no runner de 4 vCPU o
                 // medium não chegava a 60 fps em 1080p, o backlog acumulava no stdin e os
                 // últimos ~12% do render demoravam uma eternidade (barra "presa" perto do fim)
-                // v27-hf: de volta ao 'medium' — o veryfast poupava tempo mas gastava bits:
-                // para a MESMA qualidade o ficheiro saía maior (e por isso batia no limite de
-                // 8MB e era re-codificado, perdendo qualidade duas vezes). Com 4 vCPU e ~900
-                // frames o medium acrescenta ~1-2 min ao render, dentro dos 35 min.
-                '-preset', 'medium',
+                '-preset', 'veryfast',
                 // v2.11: CORREÇÃO CRÍTICA DE GAMA DE COR — "fundo/borda invisíveis".
                 // Os frames chegam do toDataURL('image/jpeg') como JPEG FULL-RANGE
                 // (yuvj420p). Sem conversão explícita, o ffmpeg copia os valores Y para
