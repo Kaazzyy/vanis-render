@@ -55,10 +55,33 @@ const _skinCache = new Map();     // assetId -> { uri: string|null, at: ms }
 let _skinQueue = Promise.resolve();   // serializes the rate-limited API calls
 let _lastSkinApiAt = 0;           // when the last thumbnails API call started
 
+// v2.11d: pasta local de skins (browser/skins/<id>.png). O render procura
+// AQUI primeiro — zero rede, zero 429. Se nao existir, vai a API como
+// antes e GUARDA o PNG nesta pasta para os proximos renders serem locais.
+const SKIN_DIR = Path.resolve(__dirname, "..", "browser", "skins");
+
 const _sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// v2.11d: le a skin do disco (browser/skins/<id>.png) sem tocar na rede.
+function _localSkinUri(assetId) {
+    try {
+        const f = Path.join(SKIN_DIR, assetId + ".png");
+        if (fs.existsSync(f)) {
+            const buf = fs.readFileSync(f);
+            if (buf.length > 0 && buf.length < 3 * 1024 * 1024) {
+                console.log("[vanis-skin] asset " + assetId + " -> carregada do ficheiro local (browser/skins/" + assetId + ".png)");
+                return "data:image/png;base64," + buf.toString("base64");
+            }
+        }
+    } catch (_r) {}
+    return null;
+}
 
 async function fetchRobloxSkin(assetId) {
     if (!/^\d+$/.test(assetId)) return null;
+    // v2.11d: o ficheiro local ganha sempre (zero rede, zero 429 da API)
+    const _loc = _localSkinUri(assetId);
+    if (_loc) { _skinCache.set(assetId, { uri: _loc, at: Date.now() }); return _loc; }
     const now = Date.now();
     const hit = _skinCache.get(assetId);
     if (hit && (hit.uri || now - hit.at < SKIN_FAIL_TTL)) return hit.uri;
@@ -106,12 +129,10 @@ async function _resolveSkin(assetId) {
         const type = ((imgRes.headers && imgRes.headers.get && imgRes.headers.get("content-type")) || "image/png").split(";")[0].toLowerCase();
         if (buf.length > 0 && buf.length < 3 * 1024 * 1024) {
             // v2.11d: write-back local — guarda o PNG em browser/skins/<id>.png.
-            // O renderer tenta ESSE ficheiro primeiro no render seguinte (zero
-            // rede), e os runners do GitHub Actions deixam de depender da
-            // thumbnails.roblox.com, que 429-a IPs partilhados. Best effort:
-            // um disco só-de-leitura nunca pode partir o render.
+            // O render seguinte le ESSE ficheiro (zero rede) e os runners deixam
+            // de depender da thumbnails.roblox.com, que 429-a IPs partilhados.
+            // Best effort: um disco so-de-leitura nunca pode partir o render.
             try {
-                const SKIN_DIR = Path.resolve(__dirname, "..", "browser", "skins");
                 if (!fs.existsSync(SKIN_DIR)) fs.mkdirSync(SKIN_DIR, { recursive: true });
                 fs.writeFileSync(Path.join(SKIN_DIR, assetId + ".png"), buf);
                 console.log("[vanis-skin] asset " + assetId + " guardado em browser/skins (proximos renders leem do local)");
