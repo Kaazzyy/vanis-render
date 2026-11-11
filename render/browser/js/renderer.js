@@ -100,10 +100,24 @@ async (_, hash, data, config) => {
         try {
             var _ss = window.__skinStats;
             if (_ss && _ss.requested > 0)
-                console.log("[skins] summary: " + _ss.resolved + " resolved, " +
+                console.log("[skins] summary: " + _ss.resolved + " resolved (" + (_ss.local || 0) + " local, " + (_ss.api || 0) + " api), " +
                     (_ss.requested - _ss.resolved) + " FAILED of " + _ss.requested +
                     " rbxassetid skin(s)" + (_ss.resolved < _ss.requested ? "  <-- see the [skins] warnings above" : ""));
         } catch (_se) {}
+
+        // v2.11d: se o clip nao tem NENHUMA skin nos dados, diz ISSO em vez de
+        // parecer um problema do render — clip velho / jogo sem export de skins.
+        try {
+            var _pm = window.game && window.game.playerManager;
+            if (_pm && _pm.players && (!window.__skinStats || window.__skinStats.requested === 0)) {
+                var _withUrl = 0;
+                Object.values(_pm.players).forEach(p => { if (p && p.skinUrl) _withUrl++; });
+                if (_withUrl > 0)
+                    console.log("[skins] clip tem " + _withUrl + " skin(s) mas nenhuma e rbxassetid (skin web?)");
+                else
+                    console.log("[skins] clip SEM skins nos dados (0 players com skinUrl) — grava um clip NOVO com o jogo atualizado; nenhum ficheiro do render resolve isto");
+            }
+        } catch (_sd) {}
 
         let buffer = await tick(0);
         setConfig(config);
@@ -1366,7 +1380,45 @@ async (_, hash, data, config) => {
                     // plain colour - exactly like a broken web skin URL today.
                     let skinSrc = this.skinUrl;
                     const RBX_SKIN = /^rbxassetid:\/\/(\d+)/i.exec(skinSrc || "");
+                    // v2.11d: pinta a textura a partir de um <img> ja carregado.
+                    // Devolve true se a skin ficou aplicada.
+                    const applySkin = img => {
+                        if (!img || !(img.naturalWidth > 0) || img.naturalWidth > 2048 || img.naturalHeight > 2048) return false;
+                        var bt = new (PIXI.BaseTexture)(img)
+                        , tx = new (PIXI.Texture)(bt);
+                        this.skinMaskSprite || (this.skinMaskSprite = s())
+                        this.skinSprite || (this.skinSprite = new (PIXI.Sprite),
+                        this.skinSprite.width = this.skinSprite.height = t.cellSize,
+                        this.skinSprite.anchor.set(.5),
+                        this.skinSprite.mask = this.skinMaskSprite);
+                        this.skinSprite.texture = tx;
+                        this.renderTexture();
+                        return true;
+                    };
                     if (RBX_SKIN) {
+                        // v2.11d: LOCAL PRIMEIRO — browser/skins/<id>.png (vem no pacote
+                        // e o App.js vai guardando aí as skins que resolve pela API).
+                        // Zero rede: os IPs partilhados dos runners do GitHub Actions
+                        // levam 429 da thumbnails.roblox.com a maior parte do tempo e
+                        // era por isso que as skins saiam sempre de cor lisa no video.
+                        const localSkin = await new Promise(res => {
+                            let settled = false;
+                            const to = setTimeout(() => { if (!settled) { settled = true; res(null); } }, 2000);
+                            n.loadImage("skins/" + RBX_SKIN[1] + ".png", img => {
+                                if (settled) return;
+                                settled = true; clearTimeout(to);
+                                res(img && img.naturalWidth > 0 ? img : null);
+                            });
+                        });
+                        if (applySkin(localSkin)) {
+                            try {
+                                window.__skinStats = window.__skinStats || { requested: 0, resolved: 0, local: 0, api: 0 };
+                                window.__skinStats.requested++; window.__skinStats.resolved++; window.__skinStats.local++;
+                            } catch (_st) {}
+                            console.log("[skins] asset " + RBX_SKIN[1] + " -> carregada do ficheiro local (sem rede)");
+                            done(); resolve();
+                            return;
+                        }
                         // v2.11b: up to 3 IPC attempts, 1.5 s apart. The thumbnails
                         // API is rate limited to ~1 req/s PER IP and GitHub Actions
                         // runners share egress IPs, so the first attempt can 429 —
@@ -1387,9 +1439,9 @@ async (_, hash, data, config) => {
                             if (!du && at < 2) await new Promise(r => setTimeout(r, 1500));
                         }
                         try {
-                            window.__skinStats = window.__skinStats || { requested: 0, resolved: 0 };
+                            window.__skinStats = window.__skinStats || { requested: 0, resolved: 0, local: 0, api: 0 };
                             window.__skinStats.requested++;
-                            if (du) window.__skinStats.resolved++;
+                            if (du) { window.__skinStats.resolved++; window.__skinStats.api++; }
                         } catch (_st) {}
                         if (handlerMissing)
                             console.warn("[skins] main process has NO 'vanis-skin' handler (App.js is old) — update render/src/App.js. id " + RBX_SKIN[1]);
@@ -1403,18 +1455,7 @@ async (_, hash, data, config) => {
                         }
                     }
                     let abort = n.loadImage(skinSrc, x => {
-                        if (!(x.naturalWidth > 2048 || x.naturalHeight > 2048)) {
-                            var a = new (PIXI.BaseTexture)(x)
-                            , e = new (PIXI.Texture)(a);
-                            
-                            this.skinMaskSprite || (this.skinMaskSprite = s())
-                            this.skinSprite || (this.skinSprite = new (PIXI.Sprite),
-                            this.skinSprite.width = this.skinSprite.height = t.cellSize,
-                            this.skinSprite.anchor.set(.5),
-                            this.skinSprite.mask = this.skinMaskSprite);
-                            this.skinSprite.texture = e;
-                            this.renderTexture();
-                        }
+                        applySkin(x);   // v2.11d: guarda naturalWidth>0 (erro de load = cor lisa, nao textura partida)
                         done(); resolve();
                     });
                     setTimeout(abort, 5000);
