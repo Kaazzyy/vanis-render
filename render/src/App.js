@@ -105,6 +105,17 @@ async function _resolveSkin(assetId) {
         const buf = Buffer.from(await (imgRes.arrayBuffer ? imgRes.arrayBuffer() : imgRes.buffer()));
         const type = ((imgRes.headers && imgRes.headers.get && imgRes.headers.get("content-type")) || "image/png").split(";")[0].toLowerCase();
         if (buf.length > 0 && buf.length < 3 * 1024 * 1024) {
+            // v2.11d: write-back local — guarda o PNG em browser/skins/<id>.png.
+            // O renderer tenta ESSE ficheiro primeiro no render seguinte (zero
+            // rede), e os runners do GitHub Actions deixam de depender da
+            // thumbnails.roblox.com, que 429-a IPs partilhados. Best effort:
+            // um disco só-de-leitura nunca pode partir o render.
+            try {
+                const SKIN_DIR = Path.resolve(__dirname, "..", "browser", "skins");
+                if (!fs.existsSync(SKIN_DIR)) fs.mkdirSync(SKIN_DIR, { recursive: true });
+                fs.writeFileSync(Path.join(SKIN_DIR, assetId + ".png"), buf);
+                console.log("[vanis-skin] asset " + assetId + " guardado em browser/skins (proximos renders leem do local)");
+            } catch (_w) {}
             return "data:" + type + ";base64," + buf.toString("base64");
         }
     } catch (err) {
