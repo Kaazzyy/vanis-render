@@ -156,6 +156,7 @@ module.exports = class RendererApp {
         this.rendering = [];
         this.tabs = {};
         this.rendered = [];
+        this._skips = {};   // v2.12: tentativas de arranque falhadas por tarefa
     }
 
     get defaultRenderConfig() {
@@ -182,11 +183,31 @@ module.exports = class RendererApp {
     }
 
     async init() {
+        // v2.12: linha de identidade — se esta linha NAO aparecer nos logs do Space
+        // depois do rebuild, o Space esta a correr codigo antigo (rebuild falhou ou
+        // nao aconteceu). Mostra tambem quantas skins locais chegaram pelo repo.
+        let _skins = 0;
+        try { _skins = fs.readdirSync(SKIN_DIR).filter(f => f.endsWith(".png")).length; } catch (_e) {}
+        console.log(`[App] v2.12 arrancado — concorrencia=${this.concurrency} | skins locais em browser/skins: ${_skins} ficheiro(s)`);
         console.log("");
         logger.verbose(`Concurrency: ${this.concurrency}`);
         await app.whenReady(); // v2.1: same race fix as worker.js
         logger.verbose("Electron app ready");
         await this.bot.init();
+
+        // v2.12: limpeza de tarefas zombie no arranque. Se o processo morreu a meio
+        // (crash/restart do Space), o pool.json pode ter tarefas cujo .vanis ja nao
+        // existe — essas tarefas travavam a fila PARA SEMPRE (o offer() devolvia
+        // sempre a mesma, o execTask saia calado e nada mais era renderizado: ficava
+        // eternamente "pending" no Discord, sem erro nenhum). Remover aqui desbloqueia.
+        let _zombie = 0;
+        for (const hash of Object.keys(this.pool.queue)) {
+            if (!fs.existsSync(Path.resolve(QUEUE_PATH, `${hash}.vanis`))) {
+                this.pool.done(hash);
+                _zombie++;
+            }
+        }
+        if (_zombie) console.log(`[App] Fila limpa no arranque: ${_zombie} tarefa(s) zombie removida(s)`);
 
         let frame = 0;
         ipcMain.on("render-error", (_, hash, msg) => this.abortTask(hash, msg));
@@ -232,7 +253,30 @@ module.exports = class RendererApp {
                 let task = this.pool.offer(h => this.tabs[h] || this.rendering.includes(h) || this.rendered.includes(h));
                 if (!task) break;
                 console.log(`[Pool] Vai renderizar ${task.hash} (${task.filename})`);
-                await this.execTask(task);
+                let started = false;
+                try {
+                    started = await this.execTask(task);
+                } catch (e) {
+                    console.error("[Exec Error]", e);
+                    logger.error(e);
+                    started = false;
+                }
+                if (!started) {
+                    // v2.12: a tarefa foi oferecida mas NAO arrancou (ficheiro em falta,
+                    // erro no arranque, callbacks em falta). Antes disto a tarefa ficava
+                    // no pool PARA SEMPRE e travava a fila inteira — os clips seguintes
+                    // ficavam eternamente "pending" sem mensagem nenhuma no Discord.
+                    // Agora: 3 tentativas e a tarefa sai da fila com mensagem de erro.
+                    this._skips[task.hash] = (this._skips[task.hash] || 0) + 1;
+                    if (this._skips[task.hash] >= 3) {
+                        delete this._skips[task.hash];
+                        this.evictTask(task, "nao conseguiu arrancar apos 3 tentativas (ve os logs do Space) — removida da fila");
+                    } else {
+                        break;
+                    }
+                } else {
+                    delete this._skips[task.hash];
+                }
             }
         } catch (e) {
             logger.error(e);
@@ -284,180 +328,210 @@ module.exports = class RendererApp {
     }
 
     async execTask(task) {
-        if (!task || !task.hash) return;
-        if (this.tabs[task.hash] || this.rendering.includes(task.hash) || this.rendered.includes(task.hash)) return;
+        if (!task || !task.hash) return false;
+        if (this.tabs[task.hash] || this.rendering.includes(task.hash) || this.rendered.includes(task.hash)) return false;
         if (!this.tasks[task.hash])
             this.tasks[task.hash] = await this.bot.generateCallbacks(task);
 
         if (!this.tasks[task.hash]) {
             logger.warn(`Failed to generate callback for task#${task.hash}, aborting`);
-            this.pool.done(task.hash);
-            return;
+            this.evictTask(task, "nao foi possivel ligar as mensagens de progresso do render");
+            return false;
         }
 
         let inputPath = Path.resolve(this.QUEUE_PATH, `${task.hash}.vanis`);
         if (!fs.existsSync(inputPath)) {
-            console.log(`[App] Ficheiro nao existe ${inputPath}`);
-            return;
+            // v2.12: antes isto saia CALADO e a tarefa ficava no pool para sempre —
+            // a fila ficava presa nela e todos os clips seguintes ficavam "pending"
+            // eternamente, sem erro nenhum no Discord. Agora: sai da fila e avisa.
+            console.log(`[App] Ficheiro nao existe ${inputPath} — tarefa removida da fila`);
+            this.evictTask(task, "o ficheiro do clip desapareceu da fila (o Space reiniciou a meio?) — envia o clip outra vez");
+            return false;
         }
         
-        let config = Object.assign({}, task.config);
-
-        // v26: refuse a corrupt clip up-front instead of opening a window that can only crash
-        const rawData = fs.readFileSync(inputPath, "utf-8");
-        const bad = this.validateVanis(rawData);
-        if (bad) {
-            console.error(`[App] Clip invalido (${task.hash}): ${bad}`);
-            try { this.tasks[task.hash].onError(bad); } catch {}
-            try { fs.unlinkSync(inputPath); } catch {}
-            this.pool.done(task.hash);
-            delete this.tasks[task.hash];
-            return;
-        }
-
+        // v2.12: QUALQUER erro entre aqui e o arranque do ffmpeg/janela deixava a tarefa
+        // presa no pool e no rendering (slot de concorrencia gasto) = fila morta e o
+        // clip eternamente "pending". Agora o erro e apanhado, o slot e libertado e o
+        // Discord recebe a mensagem de erro.
         try {
-            await this.tasks[task.hash].onBegin();
-        } catch(e) { console.error("[onBegin Error]", e); }
+            let config = Object.assign({}, task.config);
 
-        this.rendering.push(task.hash);
-        let { width, height } = this.resToDim(task.config.res);
+            // v26: refuse a corrupt clip up-front instead of opening a window that can only crash
+            const rawData = fs.readFileSync(inputPath, "utf-8");
+            const bad = this.validateVanis(rawData);
+            if (bad) {
+                console.error(`[App] Clip invalido (${task.hash}): ${bad}`);
+                this.evictTask(task, bad);
+                return false;
+            }
 
-        console.log(`[App] A criar janela ${width}x${height} para ${task.hash}`);
-        console.log(`[App] FFmpeg path: ${ffmpegPath}`);
+            try {
+                await this.tasks[task.hash].onBegin();
+            } catch(e) { console.error("[onBegin Error]", e); }
 
-        const renderWindow = new BrowserWindow({
-            width,
-            height,
-            frame: false,
-            closable: false,
-            resizable: false,
-            minimizable: false,
-            maximizable: false,
-            show: false,
-            webPreferences: { 
-                nodeIntegration: true,
-                contextIsolation: false,
-                offscreen: false,
-                backgroundThrottling: false
-            },
-        });
+            this.rendering.push(task.hash);
+            let { width, height } = this.resToDim(task.config.res);
 
-        let args = [
-            '-y',
-            '-f', 'image2pipe',
-            '-framerate', config.fps,
-            '-i', '-',
-            '-profile:v', 'baseline',
-            '-crf', {"high":"15","medium":"18","low":"30"}[config.quality],
-            // v2.9: crf recalibrado. O antigo medium=23 esmagava o padrao hexagonal do bg
-            // (juntas 16 vs celulas 12 = só 4 niveis) — depois do encode as linhas ficavam
-            // em 13-14 e o video parecia "tudo da mesma cor". com crf 15/18 o padrao sobrevive.
-            // nota: ficheiros ~2x maiores; clips longos vao para o DropBox (--res 720 / --fps 30 ajuda)
-            // v2.2: veryfast em vez do preset por omissão (medium) — no runner de 4 vCPU o
-            // medium não chegava a 60 fps em 1080p, o backlog acumulava no stdin e os
-            // últimos ~12% do render demoravam uma eternidade (barra "presa" perto do fim)
-            '-preset', 'veryfast',
-            // v2.11: CORREÇÃO CRÍTICA DE GAMA DE COR — "fundo/borda invisíveis".
-            // Os frames chegam do toDataURL('image/jpeg') como JPEG FULL-RANGE
-            // (yuvj420p). Sem conversão explícita, o ffmpeg copia os valores Y para
-            // o H.264 e tagga o vídeo como fullrange=1 — mas o player do Discord
-            // (Chromium) e a maioria dos players ASSUMEM limited range e esmagam
-            // tudo com luma <= 16 a preto puro: fundo #101010 (Y16) -> rgb(0),
-            // textura (Y12) -> rgb(0), borda (Y0) -> rgb(0). As células coloridas
-            // sobrevivem (luma alta) — daí o vídeo "tudo escuro sem borda nem bg".
-            // Convertendo full->tv aqui, o fundo fica Y30 e TODOS os players
-            // mostram os valores reais do jogo: fundo rgb(16), textura rgb(12),
-            // borda rgb(0) — paridade exata com o cliente vanis.
-            '-vf', 'scale=in_range=full:out_range=tv',
-            '-pix_fmt', 'yuv420p',
-            '-c:v', 'libx264',
-            Path.resolve(OUTPUT_PATH, `${task.hash}.mp4`)];
+            console.log(`[App] A criar janela ${width}x${height} para ${task.hash}`);
+            console.log(`[App] FFmpeg path: ${ffmpegPath}`);
 
-        if (process.platform !== "win32")
-            ffmpegPath = "ffmpeg";
+            const renderWindow = new BrowserWindow({
+                width,
+                height,
+                frame: false,
+                closable: false,
+                resizable: false,
+                minimizable: false,
+                maximizable: false,
+                show: false,
+                webPreferences: { 
+                    nodeIntegration: true,
+                    contextIsolation: false,
+                    offscreen: false,
+                    backgroundThrottling: false
+                },
+            });
+
+            let args = [
+                '-y',
+                '-f', 'image2pipe',
+                '-framerate', config.fps,
+                '-i', '-',
+                '-profile:v', 'baseline',
+                '-crf', {"high":"15","medium":"18","low":"30"}[config.quality],
+                // v2.9: crf recalibrado. O antigo medium=23 esmagava o padrao hexagonal do bg
+                // (juntas 16 vs celulas 12 = só 4 niveis) — depois do encode as linhas ficavam
+                // em 13-14 e o video parecia "tudo da mesma cor". com crf 15/18 o padrao sobrevive.
+                // nota: ficheiros ~2x maiores; clips longos vao para o DropBox (--res 720 / --fps 30 ajuda)
+                // v2.2: veryfast em vez do preset por omissão (medium) — no runner de 4 vCPU o
+                // medium não chegava a 60 fps em 1080p, o backlog acumulava no stdin e os
+                // últimos ~12% do render demoravam uma eternidade (barra "presa" perto do fim)
+                '-preset', 'veryfast',
+                // v2.11: CORREÇÃO CRÍTICA DE GAMA DE COR — "fundo/borda invisíveis".
+                // Os frames chegam do toDataURL('image/jpeg') como JPEG FULL-RANGE
+                // (yuvj420p). Sem conversão explícita, o ffmpeg copia os valores Y para
+                // o H.264 e tagga o vídeo como fullrange=1 — mas o player do Discord
+                // (Chromium) e a maioria dos players ASSUMEM limited range e esmagam
+                // tudo com luma <= 16 a preto puro: fundo #101010 (Y16) -> rgb(0),
+                // textura (Y12) -> rgb(0), borda (Y0) -> rgb(0). As células coloridas
+                // sobrevivem (luma alta) — daí o vídeo "tudo escuro sem borda nem bg".
+                // Convertendo full->tv aqui, o fundo fica Y30 e TODOS os players
+                // mostram os valores reais do jogo: fundo rgb(16), textura rgb(12),
+                // borda rgb(0) — paridade exata com o cliente vanis.
+                '-vf', 'scale=in_range=full:out_range=tv',
+                '-pix_fmt', 'yuv420p',
+                '-c:v', 'libx264',
+                Path.resolve(OUTPUT_PATH, `${task.hash}.mp4`)];
+
+            if (process.platform !== "win32")
+                ffmpegPath = "ffmpeg";
     
-        console.log(`[App] A iniciar ffmpeg: ${ffmpegPath} ${args.join(" ")}`);
-        let shell = spawn(ffmpegPath, args);
-        this.tabs[task.hash] = { window: renderWindow, shell, started: Date.now(), lastBuffer: Date.now() };
+            console.log(`[App] A iniciar ffmpeg: ${ffmpegPath} ${args.join(" ")}`);
+            let shell = spawn(ffmpegPath, args);
+            this.tabs[task.hash] = { window: renderWindow, shell, started: Date.now(), lastBuffer: Date.now() };
 
-        shell.once("exit", code => {
-            code ? logger.error(`FFMPEG exited with code ${code}`) : logger.verbose(`FFMPEG exited with code ${code}`);
-            console.log(`[FFMPEG] exit code ${code} para ${task.hash}`);
-            try { fs.unlinkSync(Path.resolve(this.QUEUE_PATH, `${task.hash}.vanis`)); } catch {}
-            let callbacks = this.tasks[task.hash];
-            const idx = this.rendering.indexOf(task.hash);
-            if (idx >= 0) this.rendering.splice(idx, 1);
-            this.rendered.push(task.hash);
-            this.pool.done(task.hash);
-            delete this.tasks[task.hash];
-            const abortReason = this.aborts && this.aborts[task.hash];
-            delete this.tabs[task.hash];
-            if (abortReason) {
-                delete this.aborts[task.hash];
-                try { fs.unlinkSync(Path.resolve(OUTPUT_PATH, `${task.hash}.mp4`)); } catch {}
-                callbacks && callbacks.onError(abortReason);
-            } else if (!code) {
-                callbacks && callbacks.onFinish();
-            } else {
-                callbacks && callbacks.onError(`Error(${code})`);
-            }
-        });
+            shell.once("exit", code => {
+                code ? logger.error(`FFMPEG exited with code ${code}`) : logger.verbose(`FFMPEG exited with code ${code}`);
+                console.log(`[FFMPEG] exit code ${code} para ${task.hash}`);
+                try { fs.unlinkSync(Path.resolve(this.QUEUE_PATH, `${task.hash}.vanis`)); } catch {}
+                let callbacks = this.tasks[task.hash];
+                const idx = this.rendering.indexOf(task.hash);
+                if (idx >= 0) this.rendering.splice(idx, 1);
+                this.rendered.push(task.hash);
+                this.pool.done(task.hash);
+                delete this.tasks[task.hash];
+                const abortReason = this.aborts && this.aborts[task.hash];
+                delete this.tabs[task.hash];
+                if (abortReason) {
+                    delete this.aborts[task.hash];
+                    try { fs.unlinkSync(Path.resolve(OUTPUT_PATH, `${task.hash}.mp4`)); } catch {}
+                    callbacks && callbacks.onError(abortReason);
+                } else if (!code) {
+                    callbacks && callbacks.onFinish();
+                } else {
+                    callbacks && callbacks.onError(`Error(${code})`);
+                }
+            });
 
-        shell.on("error", err => {
-            console.error("[FFMPEG spawn error]", err);
-            logger.error(err);
-        });
+            shell.on("error", err => {
+                console.error("[FFMPEG spawn error]", err);
+                logger.error(err);
+            });
 
-        shell.on("close", (code, signal) => {
-            logger.debug(`FFMPEG closed with code ${code} and signal ${signal}`);
-            console.log(`[FFMPEG] closed code ${code} signal ${signal}`);
-        });
+            shell.on("close", (code, signal) => {
+                logger.debug(`FFMPEG closed with code ${code} and signal ${signal}`);
+                console.log(`[FFMPEG] closed code ${code} signal ${signal}`);
+            });
 
-        let data = rawData;
-        let frames = ~~config.fps * (data.split("|").length - 4) / 25;
-        logger.verbose(`Total frame: ${frames}`);
-        console.log(`[App] Total frames estimado: ${frames}`);
+            let data = rawData;
+            let frames = ~~config.fps * (data.split("|").length - 4) / 25;
+            logger.verbose(`Total frame: ${frames}`);
+            console.log(`[App] Total frames estimado: ${frames}`);
 
-        shell.stderr.on("data", chunk => {
-            let txt = chunk.toString();
-            logger.debug(txt);
-            // console.log("[FFMPEG]", txt);
-            let args = txt.split(/ +/g);
-            if (args[0] == "frame=" && /^[1-9]\d*$/.test(args[1])) {
-                let progress = parseInt(args[1]) / frames;
-                this.tasks[task.hash].onProgress(progress);
-            }
-        });
+            shell.stderr.on("data", chunk => {
+                let txt = chunk.toString();
+                logger.debug(txt);
+                // console.log("[FFMPEG]", txt);
+                let args = txt.split(/ +/g);
+                if (args[0] == "frame=" && /^[1-9]\d*$/.test(args[1])) {
+                    let progress = parseInt(args[1]) / frames;
+                    this.tasks[task.hash].onProgress(progress);
+                }
+            });
 
-        config.res = `${width}x${height}`;
+            config.res = `${width}x${height}`;
         
-        // Captura console do browser pra debug
-        renderWindow.webContents.on("console-message", (event, level, message, line, sourceId) => {
-            console.log(`[Browser ${level}] ${message} (${sourceId}:${line})`);
-        });
-        renderWindow.webContents.on("crashed", () => {
-            console.error(`[Window] CRASHED para ${task.hash}`);
-        });
-        renderWindow.webContents.on("render-process-gone", (e, details) => {
-            console.error(`[Window] render-process-gone ${JSON.stringify(details)} para ${task.hash}`);
-        });
-        renderWindow.webContents.on("unresponsive", () => {
-            console.error(`[Window] unresponsive para ${task.hash}`);
-        });
+            // Captura console do browser pra debug
+            renderWindow.webContents.on("console-message", (event, level, message, line, sourceId) => {
+                console.log(`[Browser ${level}] ${message} (${sourceId}:${line})`);
+            });
+            renderWindow.webContents.on("crashed", () => {
+                console.error(`[Window] CRASHED para ${task.hash}`);
+            });
+            renderWindow.webContents.on("render-process-gone", (e, details) => {
+                console.error(`[Window] render-process-gone ${JSON.stringify(details)} para ${task.hash}`);
+            });
+            renderWindow.webContents.on("unresponsive", () => {
+                console.error(`[Window] unresponsive para ${task.hash}`);
+            });
 
-        renderWindow.webContents.once("dom-ready", () => {
-            logger.verbose(`Starting to render ${task.hash}`);
-            console.log(`[App] dom-ready, a enviar render para ${task.hash}`);
-            // Abre DevTools se precisar ver erro - comenta depois
-            // renderWindow.webContents.openDevTools({ mode: 'detach' });
-            renderWindow.webContents.send("render", task.hash, data, config);
-        });
+            renderWindow.webContents.once("dom-ready", () => {
+                logger.verbose(`Starting to render ${task.hash}`);
+                console.log(`[App] dom-ready, a enviar render para ${task.hash}`);
+                // Abre DevTools se precisar ver erro - comenta depois
+                // renderWindow.webContents.openDevTools({ mode: 'detach' });
+                renderWindow.webContents.send("render", task.hash, data, config);
+            });
 
-        renderWindow.webContents.on("did-fail-load", (e, code, desc) => {
-            console.error(`[Window] did-fail-load ${code} ${desc}`);
-        });
+            renderWindow.webContents.on("did-fail-load", (e, code, desc) => {
+                console.error(`[Window] did-fail-load ${code} ${desc}`);
+            });
 
-        renderWindow.loadFile("./browser/index.html");
+            renderWindow.loadFile("./browser/index.html");
+        } catch (e) {
+            console.error("[App] Erro ao arrancar o render:", e);
+            const _idx = this.rendering.indexOf(task.hash);
+            if (_idx >= 0) this.rendering.splice(_idx, 1);
+            if (!this.tabs[task.hash])
+                this.evictTask(task, "erro ao arrancar o render: " + (e && e.message ? e.message : e));
+            return false;
+        }
+        return true;
+    }
+
+    // v2.12: remove uma tarefa da fila de forma SEGURA e AVISADA: tira do pool, apaga o
+    // .vanis, limpa os callbacks e manda a mensagem de erro para o Discord. O caminho
+    // antigo (pool.done + return calado) deixava tarefas zombie que travavam a fila
+    // inteira sem mensagem nenhuma — era isto que mantinha os clips eternamente pendentes.
+    evictTask(task, reason) {
+        try { console.error(`[App] Tarefa ${task && task.hash} removida da fila: ${reason}`); } catch (_l) {}
+        try { this.pool.done(task.hash); } catch (_p) {}
+        try { fs.unlinkSync(Path.resolve(this.QUEUE_PATH, `${task.hash}.vanis`)); } catch (_u) {}
+        let cbs = this.tasks[task.hash];
+        delete this.tasks[task.hash];
+        if (cbs && typeof cbs.onError === "function") {
+            try { cbs.onError(reason); } catch (_c) {}
+        }
     }
 
     resToDim(res) {
