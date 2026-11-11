@@ -87,6 +87,14 @@ async (_, hash, data, config) => {
     try {
         await loadReplay(data);
 
+        // v2.11c: espera pelas skins ANTES do 1.o frame. A API da Roblox so
+        // permite ~1 pedido/segundo e as skins chegam uma a uma DEPOIS de o
+        // render comecar — sem esta espera, os primeiros segundos do video
+        // saiam com celulas de cor lisa (as skins "acendiam" a meio).
+        // Cap de 10 s: se uma skin falhar mesmo assim, o render segue com
+        // cor lisa nessa celula (igual a antes), nunca bloqueia o video.
+        if (window.waitForSkins) await window.waitForSkins(10000);
+
         // v2.11b: one-line skin summary — makes a "skins missing" report
         // diagnosable straight from the Actions log.
         try {
@@ -1340,7 +1348,10 @@ async (_, hash, data, config) => {
         }
 
         loadSkin() {
-            
+            // v2.11c: real-completion signal for waitForSkins(). Resolves when the
+            // image is on the texture, failed, or was rejected — on EVERY path.
+            var done;
+            this._skinDone = new Promise(r => { done = r; });
             return new Promise(async resolve => {
                 try {
                     // console.log(`Loading Skin: ${this.skinUrl}`);
@@ -1387,7 +1398,7 @@ async (_, hash, data, config) => {
                         } else {
                             if (!handlerMissing)
                                 console.warn("[skins] asset " + RBX_SKIN[1] + " NOT resolved after 3 attempts (API rate limit / moderated / offline) — cell keeps plain colour");
-                            resolve();
+                            done(); resolve();
                             return;
                         }
                     }
@@ -1404,11 +1415,11 @@ async (_, hash, data, config) => {
                             this.skinSprite.texture = e;
                             this.renderTexture();
                         }
-                        resolve();
+                        done(); resolve();
                     });
                     setTimeout(abort, 5000);
                 } catch (e) { 
-                    resolve(); 
+                    done(); resolve(); 
                 } finally {
                     resolve();
                 };
@@ -1859,6 +1870,22 @@ async (_, hash, data, config) => {
         save: () => {}
     }
     window.loadReplay = n.replay.load;
+
+    // v2.11c: waits until every player's skin finished loading (image on the
+    // player texture) or ms elapses — whatever happens first. Skins that failed
+    // resolve immediately (cell keeps its plain colour, exactly like before);
+    // players without skin are not waited on at all.
+    window.waitForSkins = async (ms) => {
+        try {
+            ms = ms || 10000;
+            var pm = window.game && window.game.playerManager;
+            if (!pm || !pm.players) return;
+            var ps = [];
+            Object.values(pm.players).forEach(p => { if (p && p._skinDone) ps.push(p._skinDone); });
+            if (!ps.length) return;
+            await Promise.race([Promise.all(ps), new Promise(r => setTimeout(r, ms))]);
+        } catch (e) { console.warn("[skins] waitForSkins: " + e); }
+    };
 }
 , , function(x, a, e) {
 }
