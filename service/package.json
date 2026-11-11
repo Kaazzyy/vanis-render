@@ -1,12 +1,12 @@
 {
-  "name": "vanis-service",
+  "name": "vanis-render-worker",
   "version": "2.0.0",
   "private": true,
-  "type": "module",
-  "description": "Vanis API",
+  "main": "worker.js",
   "dependencies": {
-    "cors": "^2.8.5",
     "discord.js": "^14.14.1",
-    "express": "^4.19.2"
+    "dropbox-v2-api": "^2.4.4",
+    "electron": "^28.0.0",
+    "uid-safe": "^2.1.5"
   }
 }
