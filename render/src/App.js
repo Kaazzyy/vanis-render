@@ -404,7 +404,7 @@ module.exports = class RendererApp {
                 '-framerate', config.fps,
                 '-i', '-',
                 '-profile:v', 'baseline',
-                '-crf', {"high":"15","medium":"18","low":"30"}[config.quality],
+                '-crf', {"high":"14","medium":"17","low":"26"}[config.quality],
                 // v2.9: crf recalibrado. O antigo medium=23 esmagava o padrao hexagonal do bg
                 // (juntas 16 vs celulas 12 = só 4 niveis) — depois do encode as linhas ficavam
                 // em 13-14 e o video parecia "tudo da mesma cor". com crf 15/18 o padrao sobrevive.
@@ -412,7 +412,11 @@ module.exports = class RendererApp {
                 // v2.2: veryfast em vez do preset por omissão (medium) — no runner de 4 vCPU o
                 // medium não chegava a 60 fps em 1080p, o backlog acumulava no stdin e os
                 // últimos ~12% do render demoravam uma eternidade (barra "presa" perto do fim)
-                '-preset', 'veryfast',
+                // v27-hf: de volta ao 'medium' — o veryfast poupava tempo mas gastava bits:
+                // para a MESMA qualidade o ficheiro saía maior (e por isso batia no limite de
+                // 8MB e era re-codificado, perdendo qualidade duas vezes). Com 4 vCPU e ~900
+                // frames o medium acrescenta ~1-2 min ao render, dentro dos 35 min.
+                '-preset', 'medium',
                 // v2.11: CORREÇÃO CRÍTICA DE GAMA DE COR — "fundo/borda invisíveis".
                 // Os frames chegam do toDataURL('image/jpeg') como JPEG FULL-RANGE
                 // (yuvj420p). Sem conversão explícita, o ffmpeg copia os valores Y para
@@ -551,9 +555,3 @@ module.exports = class RendererApp {
         }[res];
     }
 }
-
-// v27-hf: o worker (render/worker.js) corre o render sem chamar App.init(),
-// por isso precisa de acesso directo ao resolvedor de skins para registar ele
-// próprio o ipcMain.handle("vanis-skin"). Fica como propriedade estática da
-// classe exportada, sem mudar a forma como o App.js é usado pelo bot.
-module.exports.fetchRobloxSkin = fetchRobloxSkin;
