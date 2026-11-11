@@ -62,14 +62,14 @@ async function whPatch(id, payload) {
     return res.ok;
   } catch (e) { log("PATCH falhou:", e.message); return false; }
 }
-function barEmbed(pct, title) {
+function barEmbed(pct, title, stats) {
   const p = Math.max(0, Math.min(1, pct));
   const filled = Math.round(p * 19);
   const bar = "`[" + "=".repeat(filled) + ">" + " ".repeat(19 - filled) + "]`";
   return new (require("discord.js").EmbedBuilder)()
     .setTitle(title || `${INPUT_FILENAME}.mp4 (rendering)`)
     .setColor(0x00FFFF)
-    .setDescription(`${bar} **${Math.round(p * 100)}%**`)
+    .setDescription(`${bar} **${Math.round(p * 100)}%**` + (stats ? `\n\n\`${stats}\`` : ""))
     .setTimestamp();
 }
 
@@ -98,53 +98,26 @@ function renderStats() {
   ].filter(Boolean).join(" | ");
 }
 
-// v27-hf: duração REAL do mp4. O `seconds` que o sendVideo recebe é o tempo de
-// render (relógio), não a duração do vídeo — e é a duração que define quantos
-// bits cabem em 8MB. ffprobe vem no pacote ffmpeg; se faltar, estima pelos
-// frames que o jogo enviou (frames / fps).
-function probeDuration(filePath) {
-  try {
-    const { spawnSync } = require("child_process");
-    const r = spawnSync("ffprobe", [
-      "-v", "error", "-show_entries", "format=duration",
-      "-of", "default=noprint_wrappers=1:nokey=1", filePath,
-    ], { encoding: "utf8" });
-    const d = parseFloat(String((r && r.stdout) || "").trim());
-    if (isFinite(d) && d > 0.5) return d;
-  } catch {}
-  const fps = Number(INPUT_CONFIG.fps) || 60;
-  return STATS.buffers > 0 ? STATS.buffers / fps : 0;
-}
-
 async function sendVideo(filePath, seconds) {
   const MAX = 7.8 * 1024 * 1024;
   let sendPath = filePath;
   let size = fs.statSync(sendPath).size;
 
-  // Se o mp4 passar do limite do webhook, volta a codificar.
-  // v27-hf: antes era CRF 33 (que esmagava a imagem toda). Agora o alvo é um
-  // BITRATE calculado para caber no limite — mantém a resolução e usa preset
-  // medium, que dá muito mais qualidade por bit do que o CRF 33 + fast.
+  // se o mp4 for grande demais para o webhook, re-comprime.
+  // v27-hf: o CRF 33 sozinho nao chega para um 1080p60 longo — o clip ficava
+  // sem ser entregue. Segunda tentativa a 720p garante que sai sempre video.
   if (size > MAX) {
     const { spawnSync } = require("child_process");
     const heavy = path.join(OUTPUT_PATH, INPUT_FILENAME + "_small.mp4");
-    const dur = probeDuration(filePath);                 // segundos de vídeo real
-    const budgetBits = 7.2 * 1024 * 1024 * 8;            // folga p/ o overhead do multipart
-    const kbps = dur > 0 ? Math.max(700, Math.floor(budgetBits / dur / 1000)) : 2500;
-    // Abaixo de ~3 Mbps o 1080p60 enche-se de blocos; aí o 720p com os mesmos
-    // bits fica visivelmente melhor. Para clips curtos (muitos bits) mantém-se
-    // 1080p e só se desce para 720p se ainda não couber.
-    const tries = kbps < 3000
-      ? [{ label: `720p ~${kbps}kbps`, extra: ["-vf", "scale=-2:720"] }]
-      : [{ label: `1080p ~${kbps}kbps`, extra: [] },
-         { label: `720p ~${kbps}kbps`, extra: ["-vf", "scale=-2:720"] }];
+    const tries = [
+      { crf: "33", extra: [] },
+      { crf: "30", extra: ["-vf", "scale=-2:720"] },
+    ];
     for (const t of tries) {
-      log(`mp4 tem ${(size / 1048576).toFixed(1)}MB — a re-codificar (${t.label}, preset medium)`);
+      log(`mp4 tem ${(size / 1048576).toFixed(1)}MB — a re-comprimir (CRF ${t.crf}${t.extra.length ? ", 720p" : ""})`);
       const r = spawnSync("ffmpeg", [
-        "-y", "-i", filePath, ...t.extra,
-        "-c:v", "libx264", "-preset", "medium",
-        "-b:v", `${kbps}k`, "-maxrate", `${Math.round(kbps * 1.4)}k`, "-bufsize", `${Math.round(kbps * 2)}k`,
-        "-pix_fmt", "yuv420p", "-movflags", "+faststart", heavy,
+        "-y", "-i", filePath, ...t.extra, "-c:v", "libx264", "-crf", t.crf,
+        "-preset", "fast", "-pix_fmt", "yuv420p", "-movflags", "+faststart", heavy,
       ], { stdio: "ignore" });
       if (r.status === 0 && fs.existsSync(heavy)) {
         sendPath = heavy;
@@ -184,6 +157,46 @@ function guardCrash(kind, e) {
 process.on("uncaughtException", (e) => guardCrash("uncaughtException", e));
 process.on("unhandledRejection", (e) => guardCrash("unhandledRejection", e));
 
+// ---------- skins ----------
+// v27-hf: as skins eram pedidas pelo renderer JÁ com o render a arrancar: cada
+// uma passa pela fila da API (1.1 s entre pedidos, o IP do runner é partilhado)
+// e o renderer só espera 10 s — com vários jogadores, as últimas ficavam sem
+// skin (ou todas, se a API responder 429). Aqui descodificam-se os pacotes do
+// replay, recolhem-se os rbxassetid:// e resolvem-se TODOS antes de a janela
+// abrir; quando o renderer pergunta, já está tudo em cache e é instantâneo.
+function collectSkinIds(data) {
+  const ids = new Set();
+  const parts = String(data).split("|");
+  for (let i = 3; i < parts.length; i++) {
+    const raw = parts[i];
+    if (!raw || raw.length < 16) continue;
+    let txt;
+    try { txt = Buffer.from(raw, "base64").toString("utf8"); } catch { continue; }
+    if (txt.indexOf("rbxassetid://") === -1) continue;
+    for (const m of txt.matchAll(/rbxassetid:\/\/(\d{5,})/g)) ids.add(m[1]);
+  }
+  return [...ids];
+}
+
+async function prefetchSkins(data) {
+  try {
+    if (typeof RendererApp.fetchRobloxSkin !== "function") {
+      log("[skins] App.js sem fetchRobloxSkin — a saltar pré-carga");
+      return;
+    }
+    const ids = collectSkinIds(data);
+    if (!ids.length) { log("[skins] nenhum rbxassetid:// no replay"); return; }
+    log(`[skins] a pré-carregar ${ids.length}: ${ids.join(", ")}`);
+    const all = Promise.all(ids.map(id => RendererApp.fetchRobloxSkin(id).catch(() => null)));
+    // Tecto de 30 s: se a API estiver a limitar (429) não vale a pena atrasar o
+    // render — as que faltarem resolvem-se a meio do clip, como antes.
+    const got = await Promise.race([all, new Promise(r => setTimeout(() => r(null), 30000))]);
+    if (!got) { log("[skins] pré-carga passou de 30 s — o render segue e as restantes resolvem-se durante o clip"); return; }
+    const ok = got.filter(Boolean).length;
+    log(`[skins] pré-carregadas ${ok}/${ids.length}` + (ok < ids.length ? " (as que falharam voltam a ser tentadas durante o render)" : ""));
+  } catch (e) { log("[skins] pré-carga falhou:", e.message); }
+}
+
 // ---------- main ----------
 (async () => {
   let exitCode = 1;
@@ -205,6 +218,9 @@ process.on("unhandledRejection", (e) => guardCrash("unhandledRejection", e));
     if (!res.ok) throw new Error(`API respondeu HTTP ${res.status}`);
     const data = await res.text();
     log(`Replay OK (${data.length} bytes)`);
+
+    // v27-hf: resolver as skins ANTES de abrir a janela do render.
+    await prefetchSkins(data);
 
     renderer = new RendererApp();
     // v2.1: app.on("ready") can silently hang if ready already fired (race on fast runners)
@@ -237,7 +253,7 @@ process.on("unhandledRejection", (e) => guardCrash("unhandledRejection", e));
           // v2.8: avisa logo no Discord que o jogo acabou e o ffmpeg esta a finalizar
           if (progressMessageId)
             whPatch(progressMessageId, { embeds: [barEmbed(STATS.lastPct / 100,
-              `${INPUT_FILENAME}.mp4 (finalizing)`)] }).catch(() => {});
+              `${INPUT_FILENAME}.mp4 (finalizing)`, renderStats())] }).catch(() => {});
         }
       } else if (buffer) {
         STATS.dropped++; // ffmpeg morreu — sem isto o render continuava a "andar" às cegas
@@ -316,7 +332,7 @@ process.on("unhandledRejection", (e) => guardCrash("unhandledRejection", e));
         const title = STATS.stdinEnded
           ? `${INPUT_FILENAME}.mp4 (finalizing — encoding the backlog)`
           : `${INPUT_FILENAME}.mp4 (rendering)`;
-        whPatch(progressMessageId, { embeds: [barEmbed(STATS.lastPct / 100, title)] });
+        whPatch(progressMessageId, { embeds: [barEmbed(STATS.lastPct / 100, title, stats)] });
       } else if (STATS.lastPct !== _hbLastPct) {
         _hbLastPct = STATS.lastPct;
       }
