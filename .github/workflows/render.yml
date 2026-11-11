@@ -74,7 +74,11 @@ jobs:
           INPUT_FILENAME: ${{ github.event.inputs.filename }}
         # v2.4: --disable-gpu REMOVIDO — matava o WebGL (SwiftShader falhava) e o
         # jogo caía para o renderer Canvas, sem imagem de fundo nem borda visível
-        run: xvfb-run -a npx electron . --no-sandbox --disable-dev-shm-usage
+        # v2.6: saida guardada em render_log.txt — o passo de falha envia a cauda
+        # do log real para o Discord (diagnostico sem abrir o GitHub)
+        run: |
+          set -o pipefail
+          xvfb-run -a npx electron . --no-sandbox --disable-dev-shm-usage 2>&1 | tee render_log.txt
 
       # v2.3: se o job falhar ANTES de o worker conseguir avisar (ex.: falha no
       # apt/npm, como o run #8), o Discord ficava sem nenhuma mensagem. Este
@@ -84,10 +88,30 @@ jobs:
         env:
           WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SYS_OUT: ${{ steps.sysdeps.outcome }}
+          NPM_OUT: ${{ steps.npmdeps.outcome }}
+          RENDER_OUT: ${{ steps.render.outcome }}
         run: |
           STEP="unknown step"
-          if [ "${{ steps.sysdeps.outcome }}" = "failure" ]; then STEP="Install system deps (apt-get)"; fi
-          if [ "${{ steps.npmdeps.outcome }}" = "failure" ]; then STEP="Install npm deps"; fi
-          if [ "${{ steps.render.outcome }}" = "failure" ]; then STEP="Render + send to Discord (worker crash)"; fi
-          PAYLOAD=$(printf '{"content":"❌ The Actions render job failed at: **%s**.\\nRun log: %s"}' "$STEP" "$RUN_URL")
+          if [ "$SYS_OUT" = "failure" ]; then STEP="Install system deps (apt-get)"; fi
+          if [ "$NPM_OUT" = "failure" ]; then STEP="Install npm deps"; fi
+          if [ "$RENDER_OUT" = "failure" ]; then STEP="Render + send to Discord (worker crash)"; fi
+          export STEP
+          PAYLOAD=$(python3 - <<'PYEOF'
+          import json, os
+          tail = ""
+          try:
+              with open("render_log.txt", "r", errors="replace") as f:
+                  tail = f.read()[-1100:].strip()
+          except Exception:
+              tail = ""
+          step = os.environ.get("STEP", "unknown step")
+          url = os.environ.get("RUN_URL", "")
+          msg = "❌ The Actions render job failed at: **" + step + "**.\n"
+          if tail:
+              msg += "Last log lines:\n```\n" + tail + "\n```\n"
+          msg += "Run log: " + url
+          print(json.dumps({"content": msg[:1900]}))
+          PYEOF
+          )
           curl -sf -X POST "$WEBHOOK_URL" -H 'Content-Type: application/json' -d "$PAYLOAD" || true
