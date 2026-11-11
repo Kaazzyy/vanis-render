@@ -87,6 +87,16 @@ async (_, hash, data, config) => {
     try {
         await loadReplay(data);
 
+        // v2.11b: one-line skin summary — makes a "skins missing" report
+        // diagnosable straight from the Actions log.
+        try {
+            var _ss = window.__skinStats;
+            if (_ss && _ss.requested > 0)
+                console.log("[skins] summary: " + _ss.resolved + " resolved, " +
+                    (_ss.requested - _ss.resolved) + " FAILED of " + _ss.requested +
+                    " rbxassetid skin(s)" + (_ss.resolved < _ss.requested ? "  <-- see the [skins] warnings above" : ""));
+        } catch (_se) {}
+
         let buffer = await tick(0);
         setConfig(config);
 
@@ -1346,11 +1356,37 @@ async (_, hash, data, config) => {
                     let skinSrc = this.skinUrl;
                     const RBX_SKIN = /^rbxassetid:\/\/(\d+)/i.exec(skinSrc || "");
                     if (RBX_SKIN) {
-                        let du = null;
-                        try { du = await ipcRenderer.invoke("vanis-skin", RBX_SKIN[1]); } catch (errSkin) {}
+                        // v2.11b: up to 3 IPC attempts, 1.5 s apart. The thumbnails
+                        // API is rate limited to ~1 req/s PER IP and GitHub Actions
+                        // runners share egress IPs, so the first attempt can 429 —
+                        // a silent single attempt turned into "skins missing" with
+                        // no trace in the log. Every failure now prints a [skins]
+                        // warning and the render prints a one-line summary.
+                        let du = null, handlerMissing = false;
+                        for (let at = 0; at < 3 && !du; at++) {
+                            try { du = await ipcRenderer.invoke("vanis-skin", RBX_SKIN[1]); }
+                            catch (errSkin) {
+                                // a THROWN invoke means the main process has no
+                                // "vanis-skin" handler => render/src/App.js is an
+                                // older file. Retrying cannot help.
+                                handlerMissing = true;
+                                break;
+                            }
+                            if (!(typeof du === "string" && du.slice(0, 5) === "data:")) du = null;
+                            if (!du && at < 2) await new Promise(r => setTimeout(r, 1500));
+                        }
+                        try {
+                            window.__skinStats = window.__skinStats || { requested: 0, resolved: 0 };
+                            window.__skinStats.requested++;
+                            if (du) window.__skinStats.resolved++;
+                        } catch (_st) {}
+                        if (handlerMissing)
+                            console.warn("[skins] main process has NO 'vanis-skin' handler (App.js is old) — update render/src/App.js. id " + RBX_SKIN[1]);
                         if (typeof du === "string" && du.slice(0, 5) === "data:") {
                             skinSrc = du;
                         } else {
+                            if (!handlerMissing)
+                                console.warn("[skins] asset " + RBX_SKIN[1] + " NOT resolved after 3 attempts (API rate limit / moderated / offline) — cell keeps plain colour");
                             resolve();
                             return;
                         }
