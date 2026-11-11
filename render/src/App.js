@@ -4,6 +4,12 @@ let ffmpegPath = "ffmpeg";
 try { ffmpegPath = require("@ffmpeg-installer/ffmpeg").path; } catch {}
 const { spawn }  = require("child_process");
 
+// v27-hf: no ultimo frame o ipc "buffer" faz window.destroy(). Com uma unica
+// janela, o Electron dispara "window-all-closed" e por omissao faz app.quit():
+// o processo morria com codigo 0 antes do ffmpeg acabar de codificar e antes do
+// onFinish enviar o mp4 — a barra congelava (~97%) e o video nunca aparecia.
+app.on("window-all-closed", () => {});
+
 const logger = require("./Logger");
 const Bot = require("./Bot");
 const Pool = require("./Pool");
