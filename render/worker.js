@@ -121,6 +121,20 @@ async function sendVideo(filePath, seconds) {
   if (!res.ok) throw new Error(`video upload failed ${res.status}: ${(await res.text()).slice(0, 200)}`);
 }
 
+// v2.5: se o worker crashar FORA do try principal (ex.: erro num callback do IPC,
+// falha do Electron), o MOTIVO chega ao Discord — antes o job falhava calado e
+// ficávamos só com a mensagem genérica do render.yml ("worker crash").
+function guardCrash(kind, e) {
+  console.error(`[Worker] ${kind}:`, e);
+  if (WEBHOOK) {
+    const detail = String((e && (e.stack || e.message)) || e).slice(0, 1500);
+    whPost({ content: `❌ Worker crash (${kind}): \`${detail}\`` }).catch(() => {});
+  }
+  setTimeout(() => app.exit(1), 2000);
+}
+process.on("uncaughtException", (e) => guardCrash("uncaughtException", e));
+process.on("unhandledRejection", (e) => guardCrash("unhandledRejection", e));
+
 // ---------- main ----------
 (async () => {
   let exitCode = 1;
