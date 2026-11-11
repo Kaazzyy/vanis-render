@@ -1331,10 +1331,31 @@ async (_, hash, data, config) => {
 
         loadSkin() {
             
-            return new Promise(resolve => {
+            return new Promise(async resolve => {
                 try {
                     // console.log(`Loading Skin: ${this.skinUrl}`);
-                    let abort = n.loadImage(this.skinUrl, x => {
+                    // v2.11: the Roblox client saves skins as Roblox assets
+                    // ("rbxassetid://<id>"). A browser cannot fetch that scheme, and
+                    // the real PNG behind the id lives on rbxcdn, which sends no CORS
+                    // headers (ImageLoader sets crossOrigin=anonymous for https since
+                    // v2.5) - the skin silently never appeared in the rendered videos.
+                    // The MAIN process (Node, no CORS restrictions) resolves the id to
+                    // a data URI through thumbnails.roblox.com (ipcMain.handle
+                    // "vanis-skin" in App.js). If the lookup fails the cell keeps its
+                    // plain colour - exactly like a broken web skin URL today.
+                    let skinSrc = this.skinUrl;
+                    const RBX_SKIN = /^rbxassetid:\/\/(\d+)/i.exec(skinSrc || "");
+                    if (RBX_SKIN) {
+                        let du = null;
+                        try { du = await ipcRenderer.invoke("vanis-skin", RBX_SKIN[1]); } catch (errSkin) {}
+                        if (typeof du === "string" && du.slice(0, 5) === "data:") {
+                            skinSrc = du;
+                        } else {
+                            resolve();
+                            return;
+                        }
+                    }
+                    let abort = n.loadImage(skinSrc, x => {
                         if (!(x.naturalWidth > 2048 || x.naturalHeight > 2048)) {
                             var a = new (PIXI.BaseTexture)(x)
                             , e = new (PIXI.Texture)(a);
