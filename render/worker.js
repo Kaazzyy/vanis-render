@@ -188,6 +188,13 @@ process.on("unhandledRejection", (e) => guardCrash("unhandledRejection", e));
 
     // mesmos handlers IPC do App.init (sem login de bot!)
     ipcMain.on("render-error", (_, hash, msg) => renderer.abortTask(hash, msg));
+    // v27-hf: FALTAVA ESTE. O renderer pede cada skin por
+    // ipcRenderer.invoke("vanis-skin", id); o handler só era registado em
+    // App.init(), que o worker NUNCA chama. O invoke rebentava com
+    // "No handler registered", o renderer desistia (handlerMissing) e TODAS as
+    // skins ficavam na cor da célula. O resolvedor é o mesmo do bot: ficheiro
+    // local em browser/skins/<id>.png e, se não existir, thumbnails.roblox.com.
+    ipcMain.handle("vanis-skin", async (_, assetId) => RendererApp.fetchRobloxSkin(String(assetId)));
     ipcMain.on("buffer", (_, hash, base64) => {
       const tab = renderer.tabs[hash];
       if (!tab) return;
