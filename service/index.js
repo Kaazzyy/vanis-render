@@ -355,7 +355,7 @@ if (DISCORD_TOKEN) {
 
   client.on("ready", () => {
     console.log(`[Bot] ${client.user.username} pronto a receber !render`);
-    client.user.setActivity("Vanis Clips", { type: ActivityType.Playing }).catch(() => {});
+    try { client.user.setActivity("Vanis Clips", { type: ActivityType.Playing }); } catch {}
   });
 
   client.on("error", (e) => { console.error("[Bot error]", e); pushAlert(`Discord client error: ${e.message}`); });
