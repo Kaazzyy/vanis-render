@@ -21,6 +21,19 @@ import { fileURLToPath } from "url";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// ===== v2.13: rede de seguranca — nenhum erro assincrono derruba o processo =====
+// (o crash "DiscordAPIError[10008]: Unknown Message" vinha daqui: uma mensagem
+//  temporaria ja apagada fazia o .delete() rejeitar e o Node 20 matava o processo
+//  inteiro — por isso o bot ficava "desligado do nada")
+process.on("unhandledRejection", (e) => {
+  try { pushAlert(`unhandledRejection ignorado: ${e && (e.message || e)}`); } catch {}
+  console.error("[Svc] unhandledRejection ignorado:", e && (e.stack || e));
+});
+process.on("uncaughtException", (e) => {
+  try { pushAlert(`uncaughtException ignorado: ${e && (e.message || e)}`); } catch {}
+  console.error("[Svc] uncaughtException ignorado:", e && (e.stack || e));
+});
+
 const PORT = parseInt(process.env.PORT || "10000", 10);
 const DATA_DIR = path.join(__dirname, "data");
 const FILES_DIR = path.join(DATA_DIR, "files");
@@ -121,7 +134,8 @@ const DEFAULT_CONFIG = {
 
 function replyTemp(channel, payload, ms = 10000) {
   return channel.send(payload).then(m => {
-    setTimeout(() => { try { m.delete(); } catch {} }, ms);
+    // v2.13: try/catch nao apanha erros assincronos — usar .catch()
+    setTimeout(() => { if (m && typeof m.delete === "function") m.delete().catch(() => {}); }, ms);
     return m;
   }).catch(() => null);
 }
@@ -341,7 +355,7 @@ if (DISCORD_TOKEN) {
 
   client.on("ready", () => {
     console.log(`[Bot] ${client.user.username} pronto a receber !render`);
-    client.user.setActivity("Vanis Clips", { type: ActivityType.Playing });
+    client.user.setActivity("Vanis Clips", { type: ActivityType.Playing }).catch(() => {});
   });
 
   client.on("error", (e) => { console.error("[Bot error]", e); pushAlert(`Discord client error: ${e.message}`); });
