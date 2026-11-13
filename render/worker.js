@@ -231,6 +231,14 @@ async function prefetchSkins(data) {
 
     // mesmos handlers IPC do App.init (sem login de bot!)
     ipcMain.on("render-error", (_, hash, msg) => renderer.abortTask(hash, msg));
+    // v27-hf: handler das skins. Sem ele o renderer recebe "No handler
+    // registered for 'vanis-skin'", desiste à primeira e o clip sai sem skins.
+    ipcMain.handle("vanis-skin", async (_, assetId) => {
+      if (typeof RendererApp.fetchRobloxSkin !== "function") return null;
+      return RendererApp.fetchRobloxSkin(String(assetId));
+    });
+    if (typeof RendererApp.fetchRobloxSkin !== "function")
+      console.error("[skins] AVISO: render/src/App.js não exporta fetchRobloxSkin — todas as skins vão ficar invisíveis");
     ipcMain.on("buffer", (_, hash, base64) => {
       const tab = renderer.tabs[hash];
       if (!tab) return;

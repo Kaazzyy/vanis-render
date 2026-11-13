@@ -552,3 +552,9 @@ module.exports = class RendererApp {
         }[res];
     }
 }
+
+// v27-hf: o worker corre o render sem chamar App.init(), por isso precisa de
+// acesso directo ao resolvedor de skins para registar ele próprio o
+// ipcMain.handle("vanis-skin") — é isto que faltava e deixava todos os clips
+// sem skins. Fica como propriedade estática da classe exportada.
+module.exports.fetchRobloxSkin = fetchRobloxSkin;
