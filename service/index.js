@@ -49,12 +49,19 @@ const DB_FILE = path.join(DATA_DIR, "db.json");
 // próprio código (clips/<code>.vanis), por isso não há mapa para perder.
 // Sem as 4 variáveis preenchidas, o serviço volta ao disco local (dev).
 // ============================================================
-const B2_KEY_ID = process.env.B2_KEY_ID || "";
-const B2_APP_KEY = process.env.B2_APP_KEY || "";
-const B2_BUCKET = process.env.B2_BUCKET || "";
+// Um espaço/newline colado no fim da chave (muito comum no painel do Render)
+// fazia o Node rejeitar o pedido com "Invalid character in header content
+// [authorization]" — daí o 502. trim() em todas as variáveis.
+const B2_KEY_ID = (process.env.B2_KEY_ID || "").trim();
+const B2_APP_KEY = (process.env.B2_APP_KEY || "").trim();
+const B2_BUCKET = (process.env.B2_BUCKET || "").trim();
 const B2_ENDPOINT = (process.env.B2_ENDPOINT || "").trim().replace(/^https?:\/\//i, "").replace(/\/+$/, "");
-const B2_REGION = process.env.B2_REGION || (B2_ENDPOINT.match(/^s3\.([^.]+)\./i) || [])[1] || "us-west-004";
-const B2_PREFIX = (process.env.B2_PREFIX || "clips").replace(/^\/+|\/+$/g, "");
+const B2_REGION = (process.env.B2_REGION || (B2_ENDPOINT.match(/^s3\.([^.]+)\./i) || [])[1] || "us-west-004").trim();
+const B2_PREFIX = (process.env.B2_PREFIX || "clips").trim().replace(/^\/+|\/+$/g, "");
+
+for (const [k, v] of [["B2_KEY_ID", B2_KEY_ID], ["B2_APP_KEY", B2_APP_KEY], ["B2_BUCKET", B2_BUCKET]]) {
+  if (v && /[^\x21-\x7e]/.test(v)) console.warn(`[B2] ${k} tinha caracteres inválidos no meio (espaços?) — verifica o valor no Render`);
+}
 
 const b2 = (B2_KEY_ID && B2_APP_KEY && B2_BUCKET && B2_ENDPOINT)
   ? new S3Client({
@@ -114,7 +121,7 @@ app.get("/api/replays/:code", async (req, res) => {
       if (st === 404 || e.name === "NoSuchKey" || e.name === "NotFound")
         return res.status(404).send("file not found");
       console.error(`[B2] GET ${code} falhou:`, e && e.message);
-      return res.status(502).send("storage error");
+      return res.status(502).send("storage error: " + String((e && e.message) || e).slice(0, 200));
     }
   }
 
