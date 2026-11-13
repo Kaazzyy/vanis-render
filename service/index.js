@@ -19,6 +19,7 @@ import {
   ActivityType,
 } from "discord.js";
 import { fileURLToPath } from "url";
+import { S3Client, PutObjectCommand, GetObjectCommand } from "@aws-sdk/client-s3";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -41,9 +42,38 @@ const DATA_DIR = path.join(__dirname, "data");
 const FILES_DIR = path.join(DATA_DIR, "files");
 const DB_FILE = path.join(DATA_DIR, "db.json");
 
+// ============================================================
+// v3: armazenamento no Backblaze B2 (API compatível com S3).
+// O disco do Render free é efémero — a cada reinício/sleep os clips
+// desapareciam. Com o B2 o ficheiro fica lá e a chave do objecto é o
+// próprio código (clips/<code>.vanis), por isso não há mapa para perder.
+// Sem as 4 variáveis preenchidas, o serviço volta ao disco local (dev).
+// ============================================================
+const B2_KEY_ID = process.env.B2_KEY_ID || "";
+const B2_APP_KEY = process.env.B2_APP_KEY || "";
+const B2_BUCKET = process.env.B2_BUCKET || "";
+const B2_ENDPOINT = (process.env.B2_ENDPOINT || "").trim().replace(/^https?:\/\//i, "").replace(/\/+$/, "");
+const B2_REGION = process.env.B2_REGION || (B2_ENDPOINT.match(/^s3\.([^.]+)\./i) || [])[1] || "us-west-004";
+const B2_PREFIX = (process.env.B2_PREFIX || "clips").replace(/^\/+|\/+$/g, "");
+
+const b2 = (B2_KEY_ID && B2_APP_KEY && B2_BUCKET && B2_ENDPOINT)
+  ? new S3Client({
+      region: B2_REGION,
+      endpoint: "https://" + B2_ENDPOINT,
+      forcePathStyle: true,          // o B2 só suporta path-style
+      credentials: { accessKeyId: B2_KEY_ID, secretAccessKey: B2_APP_KEY },
+    })
+  : null;
+
+const b2Key = code => `${B2_PREFIX}/${code}.vanis`;
+
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 if (!fs.existsSync(FILES_DIR)) fs.mkdirSync(FILES_DIR, { recursive: true });
 if (!fs.existsSync(DB_FILE)) fs.writeFileSync(DB_FILE, JSON.stringify({}));
+
+console.log(b2
+  ? `[B2] storage ativo: bucket=${B2_BUCKET} endpoint=${B2_ENDPOINT} prefixo=${B2_PREFIX}/`
+  : "[B2] sem credenciais (B2_KEY_ID/B2_APP_KEY/B2_BUCKET/B2_ENDPOINT) — a usar disco local, que se perde em cada reinício");
 
 function loadDB() {
   try { return JSON.parse(fs.readFileSync(DB_FILE, "utf8")); } catch { return {}; }
@@ -67,8 +97,27 @@ app.get("/api/replays", (req, res) => {
   res.json({ count: Object.keys(loadDB()).length });
 });
 
-app.get("/api/replays/:code", (req, res) => {
-  const code = req.params.code;
+app.get("/api/replays/:code", async (req, res) => {
+  const code = String(req.params.code || "");
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(code)) return res.status(404).send("invalid code");
+
+  // v3: com B2 o clip vive no bucket; a chave é o próprio código
+  if (b2) {
+    try {
+      const obj = await b2.send(new GetObjectCommand({ Bucket: B2_BUCKET, Key: b2Key(code) }));
+      const bytes = await obj.Body.transformToByteArray();
+      res.setHeader("Content-Type", "text/plain; charset=utf-8");
+      res.setHeader("Cache-Control", "no-store");
+      return res.send(Buffer.from(bytes));
+    } catch (e) {
+      const st = e && e.$metadata && e.$metadata.httpStatusCode;
+      if (st === 404 || e.name === "NoSuchKey" || e.name === "NotFound")
+        return res.status(404).send("file not found");
+      console.error(`[B2] GET ${code} falhou:`, e && e.message);
+      return res.status(502).send("storage error");
+    }
+  }
+
   const db = loadDB();
   if (!db[code]) return res.status(404).send("invalid code");
   const filePath = path.join(FILES_DIR, code + ".vanis");
@@ -77,7 +126,7 @@ app.get("/api/replays/:code", (req, res) => {
   res.sendFile(filePath);
 });
 
-app.post("/api/replays", (req, res) => {
+app.post("/api/replays", async (req, res) => {
   let buf = req.body;
   if (!buf || buf.length === 0) return res.status(400).json({ error: "empty body" });
 
@@ -100,11 +149,32 @@ app.post("/api/replays", (req, res) => {
   }
 
   const code = genCode(16);
-  const db = loadDB();
-  db[code] = { createdAt: new Date().toISOString(), size: buf.length };
-  saveDB(db);
-  fs.writeFileSync(path.join(FILES_DIR, code + ".vanis"), buf);
-  console.log(`Saved replay ${code} (${buf.length} bytes)`);
+
+  // v3: upload para o B2. O objecto fica em clips/<code>.vanis.
+  if (b2) {
+    try {
+      await b2.send(new PutObjectCommand({
+        Bucket: B2_BUCKET,
+        Key: b2Key(code),
+        Body: buf,
+        ContentType: "text/plain; charset=utf-8",
+      }));
+    } catch (e) {
+      console.error(`[B2] PUT ${code} falhou:`, e && e.message);
+      return res.status(502).json({ error: "storage upload failed" });
+    }
+  } else {
+    fs.writeFileSync(path.join(FILES_DIR, code + ".vanis"), buf);
+  }
+
+  // db.json é só um índice local (best-effort): com B2 o GET não depende dele
+  try {
+    const db = loadDB();
+    db[code] = { createdAt: new Date().toISOString(), size: buf.length };
+    saveDB(db);
+  } catch {}
+
+  console.log(`Saved replay ${code} (${buf.length} bytes)${b2 ? " → B2" : " → disco"}`);
   res.json({ code });
 });
 

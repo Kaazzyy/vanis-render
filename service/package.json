@@ -5,6 +5,7 @@
   "type": "module",
   "main": "index.js",
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.600.0",
     "cors": "^2.8.5",
     "express": "^4.19.2",
     "discord.js": "^14.14.1"
